@@ -274,8 +274,11 @@ class Config
     // 0 game upscaler again on the NR'd clean image (zero jitter), 1 private DLSS SR on it (zero
     // jitter), 2 NR's edit shifted by the jitter and added onto the raw render, then the game's upscale.
     CustomOptional<int> DlssNrDenoiseFirstStep { 2 };
-    // Step 2 only. 0 difference (NR - clean, added), 1 ratio (NR / clean, multiplied).
-    CustomOptional<int> DlssNrDenoiseFirstEdit { 0 };
+    // Step 2 only. 0 difference (NR - clean, added), 1 ratio (NR / clean, multiplied). Ratio is the
+    // default: a path-traced sample is a lottery around the clean value, and an absolute edit sized
+    // for the clean value recolours the samples that came back dark, which doubles the colour noise
+    // RR receives. A gain keeps every sample's own hue.
+    CustomOptional<int> DlssNrDenoiseFirstEdit { 1 };
     // Step 2 only. Resampling kernel for the shifted edit: 0 bilinear, 1 Catmull-Rom, 2 Lanczos 2.
     CustomOptional<int> DlssNrDenoiseFirstKernel { 1 };
     // Step 2 only. Shift the edit by the frame's jitter so it lines up with the raw render's samples.

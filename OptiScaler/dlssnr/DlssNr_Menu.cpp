@@ -244,9 +244,10 @@ void RenderMenu(Config* config, float menuResScale)
                 int edit = config->DlssNrDenoiseFirstEdit.value_or_default() == 1 ? 1 : 0;
                 if (ImGui::Combo("Edit as", &edit, "Difference (added)\0Ratio (multiplied)\0"))
                     config->DlssNrDenoiseFirstEdit = edit;
-                HelpMarker("Difference adds NR's change in absolute terms: raw + (NR - clean).\nRatio multiplies: raw x "
-                           "(NR / clean). Ratio scales noise together with the change and can never go negative, "
-                           "but it can brighten fireflies. The result is clamped at zero either way.");
+                HelpMarker("Ratio multiplies each raw pixel by NR / clean, so every noisy sample keeps its own hue "
+                           "and only its brightness and tint move. Recommended.\nDifference adds NR - clean as an "
+                           "absolute amount. On samples that came back dark that amount outweighs the sample, which "
+                           "recolours them and roughly doubles the colour noise the upscaler receives.");
 
                 bool shift = config->DlssNrDenoiseFirstShift.value_or_default();
                 if (ImGui::Checkbox("Shift the edit by the frame's jitter", &shift))
