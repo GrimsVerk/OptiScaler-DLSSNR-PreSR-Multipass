@@ -236,8 +236,10 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
               } });
     }
 
-    if (NeuralRendering && !specializedNr && !nrBeforeUpscale && !denoiseFirst &&
-        Config::Instance()->DlssNrEnabled.value_or_default())
+    // The ordinary post-upscale pass; the capture stages below follow the same decision.
+    const bool nrAfterUpscale = NeuralRendering && !specializedNr && !nrBeforeUpscale && !denoiseFirst &&
+                                Config::Instance()->DlssNrEnabled.value_or_default();
+    if (nrAfterUpscale)
     {
         pipeline.push_back(MakeDlssNrPass(*NeuralRendering, Device, InCommandList, InParameters, false,
                                           GetFeatureFlags(), timingQueue, interop, rayReconstruction, submissionEpoch));
@@ -290,8 +292,6 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     auto* originalColor = GetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Color);
     // The pipeline capture (Ctrl+F8) follows every native NR placement, including the post-upscale
     // pass, so captures of the three placements can be compared against each other.
-    const bool nrAfterUpscale = NeuralRendering && !specializedNr && !nrBeforeUpscale && !denoiseFirst &&
-                                Config::Instance()->DlssNrEnabled.value_or_default();
     const bool diagnoseNr = (nrBeforeUpscale || denoiseFirst || nrAfterUpscale) && !interop;
     if (diagnoseNr)
         NeuralRendering->DiagnosePipeline(0, InCommandList, InParameters, originalColor, GetFeatureFlags(),
@@ -311,8 +311,11 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         bool active = false;
         void Apply()
         {
-            active = params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &x) == NVSDK_NGX_Result_Success;
-            params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &y);
+            // Only override a jitter the game actually set, so the table is left exactly as found.
+            active = params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &x) == NVSDK_NGX_Result_Success &&
+                     params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &y) == NVSDK_NGX_Result_Success;
+            if (!active)
+                return;
             params->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
             params->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
         }

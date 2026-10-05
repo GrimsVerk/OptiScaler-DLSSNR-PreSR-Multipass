@@ -386,7 +386,25 @@ void DlssNr_Dx12::DenoiseFirstAfter(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Pa
 std::string DlssNr_Dx12::DenoiseStatus()
 {
     std::lock_guard stateLock(_state->mutex);
-    return _state->denoiseFirst.status;
+    auto& df = _state->denoiseFirst;
+    std::string text = df.status;
+    // Live timings are appended at read time, never put into the logged status text.
+    if (df.current && !df.current->failed)
+    {
+        char timing[64];
+        if (df.lastDenoiseTime)
+        {
+            std::snprintf(timing, sizeof(timing), " [1:1 pass %.2f ms", *df.lastDenoiseTime);
+            text += timing;
+            if (df.current->step == State::DenoiseFirstContext::PrivateSr && df.lastEnlargeTime)
+            {
+                std::snprintf(timing, sizeof(timing), ", private SR %.2f ms", *df.lastEnlargeTime);
+                text += timing;
+            }
+            text += "]";
+        }
+    }
+    return text;
 }
 
 bool DlssNr_Dx12::SpatialReady()
@@ -542,7 +560,8 @@ bool DlssNr_Dx12::ProcessSeam(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Paramete
     // Denoise first owns the ordinary seams in IFeature_Dx12; drop its private features when it is not the active mode.
     if (beforeUpscale)
         _state->denoiseFirst.Idle(!special && !interop && cfg.DlssNrEnabled.value_or_default() &&
-                                  cfg.DlssNrDenoiseFirst.value_or_default());
+                                  cfg.DlssNrDenoiseFirst.value_or_default() &&
+                                  DlssNr::CanRunBeforeUpscale_Dx12(params));
     if (special)
         _state->EvaluateInternal(cmd, params, beforeUpscale, queue, rayReconstruction, submissionEpoch, interop);
     else

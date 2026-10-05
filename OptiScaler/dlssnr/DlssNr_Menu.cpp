@@ -280,9 +280,7 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::Spacing();
         }
 
-        placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
-                                     config->DlssNrDeferredDlss.value_or_default(),
-                                     config->DlssNrResidualAcrossRr.value_or_default(), finished);
+        // placement is current: nothing it depends on changes in the denoise-first block above.
         const bool nativePrivateVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
         if (placement.deferred && !nativePrivateVk)
         {

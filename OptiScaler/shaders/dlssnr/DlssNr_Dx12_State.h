@@ -320,8 +320,12 @@ struct DlssNr_Dx12::State
             ID3D12Device* device = nullptr;
             unsigned w = 0, h = 0, outW = 0, outH = 0, flags = 0;
             DXGI_FORMAT inputFormat {}, outputFormat {};
-            int step = EditOntoRaw;
+            // The game's own Color resource flags, so a texture lent to the game's upscale can sit in
+            // whatever state the game declares for its colour (an Unreal title says RENDER_TARGET).
+            unsigned colorFlags = 0;
+            int step = EditOntoRaw; // the step whose resources exist; the generation survives a step change
             int quality = 0;
+            unsigned long long enlargerEpoch = 0; // step 1's private SR was created on this epoch
             bool rayReconstruction = false, privateRr = false, failed = false, reset = true, readable = false;
             // Scratch. clean: the 1:1 output. edited: a copy of clean that NR edits in place.
             // composite: raw render + edit (step 2). upscaled: the private SR output (step 1).
@@ -348,7 +352,9 @@ struct DlssNr_Dx12::State
         DlssNr::GpuLifetime lifetime;
         std::string status = "not started";
         // The private passes' own cost, separate from NR's timers: the 1:1 pass, and step 1's upscale.
+        // Rebuilt when the device changes, since the query heaps belong to one device.
         std::unique_ptr<DlssNrGpuTime> denoiseTime, enlargeTime;
+        ID3D12Device* timerDevice = nullptr;
         std::optional<double> lastDenoiseTime, lastEnlargeTime;
         struct Pending
         {

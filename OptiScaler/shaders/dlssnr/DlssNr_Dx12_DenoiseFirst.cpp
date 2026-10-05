@@ -56,14 +56,6 @@ const char* KernelName(int kernel)
     }
 }
 
-std::string Ms(const std::optional<double>& ms)
-{
-    if (!ms)
-        return "";
-    char text[32];
-    std::snprintf(text, sizeof(text), " %.2f ms", *ms);
-    return text;
-}
 } // namespace
 
 auto DlssNr_Dx12::State::DenoiseFirstContext::Say(const std::string& text) -> void
@@ -115,18 +107,49 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::ReleaseResources() -> void
     lifetime.Collect();
 }
 
+namespace
+{
+// A scratch texture that can stand in for the game's Color: the game's own flags plus UAV, so it can
+// be transitioned to whatever state the game declares for its colour buffer. Created in UAV like
+// State::CreateScratch, so the first-use transition below treats both kinds alike.
+ID3D12Resource* CreateColorStandIn(ID3D12Device* device, DXGI_FORMAT format, unsigned w, unsigned h,
+                                   unsigned colorFlags)
+{
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = w;
+    desc.Height = h;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = (D3D12_RESOURCE_FLAGS) ((colorFlags | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &
+                                         ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+    ID3D12Resource* res = nullptr;
+    device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                    IID_PPV_ARGS(&res));
+    return res;
+}
+} // namespace
+
 auto DlssNr_Dx12::State::DenoiseFirstContext::Allocate(Generation& g) -> bool
 {
+    // The step-specific textures (composite, upscaled) and step 1's upscaler are made on demand, so
+    // switching steps in the menu keeps the 1:1 feature and its history.
     g.clean = owner.CreateScratch(g.device, g.inputFormat, g.w, g.h);
-    g.edited = owner.CreateScratch(g.device, g.inputFormat, g.w, g.h);
+    g.edited = CreateColorStandIn(g.device, g.inputFormat, g.w, g.h, g.colorFlags);
     g.exposure = owner.CreateScratch(g.device, DXGI_FORMAT_R32_FLOAT, 1, 1);
-    if (g.step == EditOntoRaw)
-        g.composite = owner.CreateScratch(g.device, g.inputFormat, g.w, g.h);
-    if (g.step == PrivateSr)
-        g.upscaled = owner.CreateScratch(g.device, g.outputFormat, g.outW, g.outH);
-    if (!g.clean || !g.edited || !g.exposure || (g.step == EditOntoRaw && !g.composite) ||
-        (g.step == PrivateSr && !g.upscaled))
+    if (!g.clean || !g.edited || !g.exposure)
         return false;
+    if (timerDevice != g.device)
+    {
+        denoiseTime.reset();
+        enlargeTime.reset();
+        timerDevice = g.device;
+    }
     if (!denoiseTime)
         denoiseTime = std::make_unique<DlssNrGpuTime>(g.device);
     if (!enlargeTime)
@@ -202,18 +225,28 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
 
     const unsigned flags = (featureFlags ? featureFlags : UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags));
     const unsigned key = flags & kRebuildFlags;
+    if (!(flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes))
+    {
+        // The private frame has no motion-vector extent of its own; a 1:1 feature expects render-sized
+        // motion, and display-sized vectors would be read misaligned.
+        device->Release();
+        Say("inactive: this game supplies display-resolution motion vectors; the 1:1 pass needs render-resolution "
+            "ones");
+        return handoff;
+    }
     const int step = std::clamp(cfg.DlssNrDenoiseFirstStep.value_or_default(), 0, 2);
     auto rrInputs = rayReconstruction ? DlssNr::PrivateUpscalerDx12::ReadRrInputs(source, active->width, active->height)
                                       : DlssNr::PrivateRrInputsDx12 {};
     const bool privateRr = rrInputs.valid;
     const int quality = (int) UInt(source, NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
-    if (current && (current->rayReconstruction != rayReconstruction || current->privateRr != privateRr ||
-                    (privateRr && (current->rr.roughnessMode != rrInputs.roughnessMode ||
-                                   current->rr.hardwareDepth != rrInputs.hardwareDepth)) ||
-                    current->device != device || current->w != active->width || current->h != active->height ||
-                    current->outW != outDesc.Width || current->outH != outDesc.Height ||
-                    current->inputFormat != inDesc.Format || current->outputFormat != outDesc.Format ||
-                    current->flags != key || current->step != step || current->quality != quality))
+    if (current &&
+        (current->rayReconstruction != rayReconstruction || current->privateRr != privateRr ||
+         (privateRr && (current->rr.roughnessMode != rrInputs.roughnessMode ||
+                        current->rr.hardwareDepth != rrInputs.hardwareDepth)) ||
+         current->device != device || current->w != active->width || current->h != active->height ||
+         current->outW != outDesc.Width || current->outH != outDesc.Height || current->inputFormat != inDesc.Format ||
+         current->outputFormat != outDesc.Format || current->flags != key ||
+         current->colorFlags != (unsigned) inDesc.Flags || current->quality != quality))
         RetireCurrent();
     if (!current)
     {
@@ -232,6 +265,7 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
         current->inputFormat = inDesc.Format;
         current->outputFormat = outDesc.Format;
         current->flags = key;
+        current->colorFlags = (unsigned) inDesc.Flags;
         current->step = step;
         current->quality = quality;
         current->rayReconstruction = rayReconstruction;
@@ -298,21 +332,6 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
             Say(std::string("1:1 ") + (g.privateRr ? "RR" : "DLSS") + " creation failed: " + g.denoiser->Error());
             return handoff;
         }
-        if (g.step == PrivateSr)
-        {
-            DlssNr::PrivateUpscalerCreateDx12 up = info;
-            up.outputWidth = g.outW;
-            up.outputHeight = g.outH;
-            up.quality = g.quality;
-            up.rayReconstruction = false;
-            g.enlarger = std::make_unique<DlssNr::PrivateUpscalerDx12>(DlssNr::PrivateUpscaler::DLSS);
-            if (!g.enlarger->Init(g.device, cmd, up))
-            {
-                g.failed = true;
-                Say("private DLSS SR creation failed: " + g.enlarger->Error());
-                return handoff;
-            }
-        }
         DlssNrConstants unit {};
         unit.Mode = DlssNrMode_UnitExposure;
         unit.Width = unit.Height = 1;
@@ -334,6 +353,61 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
     }
     if (submittedEpoch == g.createEpoch)
         return handoff; // the creation command list has not provably been submitted yet
+
+    // Step-specific resources, made the first time a step asks for them. A step change keeps the
+    // 1:1 feature and its history; only the new step's own textures and upscaler are added.
+    g.step = step;
+    if (step == EditOntoRaw && !g.composite)
+    {
+        g.composite = CreateColorStandIn(g.device, g.inputFormat, g.w, g.h, g.colorFlags);
+        if (!g.composite)
+        {
+            g.failed = true;
+            Say("allocation failed");
+            return handoff;
+        }
+        owner.Barrier(cmd, g.composite, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+    if (step == PrivateSr && !g.upscaled)
+    {
+        g.upscaled = owner.CreateScratch(g.device, g.outputFormat, g.outW, g.outH);
+        if (!g.upscaled)
+        {
+            g.failed = true;
+            Say("allocation failed");
+            return handoff;
+        }
+        owner.Barrier(cmd, g.upscaled, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+    if (step == PrivateSr && !g.enlarger)
+    {
+        ScopedNrStateEnvelope envelope(cmd);
+        DlssNr::PrivateUpscalerCreateDx12 up {};
+        up.width = g.w;
+        up.height = g.h;
+        up.outputWidth = g.outW;
+        up.outputHeight = g.outH;
+        up.quality = g.quality;
+        up.depthInverted = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+        up.jitteredMotion = (flags & NVSDK_NGX_DLSS_Feature_Flags_MVJittered) != 0;
+        up.lowResolutionMotion = true;
+        up.hdr = hdr;
+        up.autoExposure = autoExposure;
+        g.enlarger = std::make_unique<DlssNr::PrivateUpscalerDx12>(DlssNr::PrivateUpscaler::DLSS);
+        if (!g.enlarger->Init(g.device, cmd, up))
+        {
+            g.failed = true;
+            Say("private DLSS SR creation failed: " + g.enlarger->Error());
+            return handoff;
+        }
+        g.enlargerEpoch = submittedEpoch;
+        Say("private DLSS SR created; waiting for a later submission epoch");
+        return handoff;
+    }
+    if (step == PrivateSr && submittedEpoch == g.enlargerEpoch)
+        return handoff;
 
     // Frame parameters shared by the private passes and NR.
     auto* exposureTexture = GetUpscalerResource_Dx12(source, NVSDK_NGX_Parameter_ExposureTexture);
@@ -466,10 +540,11 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
     std::string detail;
     if (g.step == GameUpscaler)
     {
-        // Lent in the compute-readable state: that is what the upscaler reads it in, whatever
-        // state the game declares for its own colour buffer.
+        // Lent in the state the game declares for its own colour, since the upscaler backends and
+        // the capture barrier from that state; After() takes it back to readable.
+        owner.Barrier(cmd, g.edited, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, arrival);
         pending.handedOff = g.edited;
-        pending.handedState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        pending.handedState = arrival;
         handoff.color = g.edited;
         handoff.zeroJitter = true;
     }
@@ -495,7 +570,6 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
             return handoff;
         }
         handoff.replaceOutput = true;
-        detail = Ms(lastEnlargeTime);
     }
     else
     {
@@ -520,20 +594,21 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
         owner.Barrier(cmd, g.composite, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const bool ok = owner.shader.DispatchDenoiseFirstPass(cmd, c, color, g.edited, g.clean, g.composite);
-        owner.Barrier(cmd, g.composite, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         owner.Barrier(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, arrival);
         if (!ok)
         {
+            owner.Barrier(cmd, g.composite, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             g.reset = true;
             Say("edit composition failed; the game's upscale keeps its raw input");
             return handoff;
         }
+        // Lent in the game's declared colour state; After() takes it back to readable.
+        owner.Barrier(cmd, g.composite, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, arrival);
         if (owner.pipelineCapture)
-            owner.pipelineCapture->Copy(cmd, g.device, "composite", g.composite,
-                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            owner.pipelineCapture->Copy(cmd, g.device, "composite", g.composite, arrival);
         pending.handedOff = g.composite;
-        pending.handedState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        pending.handedState = arrival;
         handoff.color = g.composite;
         // No per-frame numbers here: the status is logged whenever it changes.
         detail = std::string(" (") + KernelName((int) c.DebugView) + ", " + (c.CompareMode ? "ratio" : "difference") +
@@ -544,8 +619,8 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
     pending.caller = source;
     pending.replaceOutput = handoff.replaceOutput;
     g.reset = false;
-    Say(std::string("running: ") + (g.privateRr ? "RR" : "DLSS") + " 1:1" + Ms(lastDenoiseTime) + " -> NR -> " +
-        StepName(g.step) + detail);
+    // No timings here: Say() logs on every change, and DenoiseStatus() appends the live numbers.
+    Say(std::string("running: ") + (g.privateRr ? "RR" : "DLSS") + " 1:1 -> NR -> " + StepName(g.step) + detail);
     return handoff;
 }
 
