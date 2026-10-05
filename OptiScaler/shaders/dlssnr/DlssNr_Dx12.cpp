@@ -565,7 +565,7 @@ bool DlssNr_Dx12::ProcessSeam(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Paramete
     return special;
 }
 void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
-                                   ID3D12Resource* color, uint32_t flags, bool rr, bool success)
+                                   ID3D12Resource* color, uint32_t flags, bool rr, bool success, bool last)
 {
     std::lock_guard ownersLock(nrOwnersMutex);
     std::lock_guard stateLock(_state->mutex);
@@ -614,10 +614,18 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
         job->directory = state.pipelineCaptureDirectory / std::to_string(4 - state.pipelineCaptureRemaining);
         job->metadata << "stage_semantics before_nr=scene_linear_input after_nr=NR_composed_RR_input "
                          "after_rr=upscaler_output_before_postprocessing clean=denoise_first_1to1_output "
-                         "nr_clean=NR_on_clean composite=raw_plus_shifted_edit\n"
+                         "nr_clean=NR_on_clean composite=raw_plus_shifted_edit "
+                         "after_nr_post=upscaler_output_after_post_upscale_NR\n"
                       << "game_frame " << ::State::Instance().frameCount << " command_list " << cmd << " parameters "
                       << params << " rr " << rr << " feature_flags " << flags << '\n';
         const auto& cfg = *Config::Instance();
+        job->metadata << "nr_placement "
+                      << (cfg.DlssNrDenoiseFirst.value_or_default() ? "denoise_first"
+                          : cfg.DlssNrRunBeforeSr.value_or_default() ? "before_upscale"
+                                                                     : "after_upscale")
+                      << " white_point_source " << cfg.DlssNrWhitePointSource.value_or_default()
+                      << " white_point_scale " << cfg.DlssNrWhitePointScale.value_or_default() << " apply_model "
+                      << cfg.DlssNrApplyModel.value_or_default() << '\n';
         job->metadata << "nr_passes " << cfg.DlssNrPasses.value_or_default() << " working_scale "
                       << cfg.DlssNrWorkingScale.value_or_default() << " nr_history_reset " << state.nr.reset << " hold "
                       << cfg.DlssNrHoldFrame.value_or_default() << '\n';
@@ -680,8 +688,21 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
         job->Copy(cmd, _device, "after_nr", color, DlssNr::ResolveInputStates_Dx12(false).color);
         return;
     }
-    if (success)
-        job->Copy(cmd, _device, "after_rr", color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (stage == 2)
+    {
+        if (success)
+            job->Copy(cmd, _device, "after_rr", color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!last)
+            return; // a post-upscale NR pass follows; stage 3 closes the frame
+    }
+    else if (stage == 3 && success && color)
+    {
+        job->metadata << "nr_model_evaluated " << state.modelRunning << '\n';
+        const auto arrival = Config::Instance()->OutputResourceBarrier.has_value()
+                                 ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
+                                 : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        job->Copy(cmd, _device, "after_nr_post", color, arrival);
+    }
     job->End(cmd);
     state.pipelineCapture = nullptr;
     --state.pipelineCaptureRemaining;

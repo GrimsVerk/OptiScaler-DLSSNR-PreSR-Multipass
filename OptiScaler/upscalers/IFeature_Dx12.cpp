@@ -289,7 +289,11 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     auto* currentTarget = SetupShaderPipeline(pipeline, paramOutput);
     SetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Output, currentTarget);
     auto* originalColor = GetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Color);
-    const bool diagnoseNr = (nrBeforeUpscale || denoiseFirst) && !interop;
+    // The pipeline capture (Ctrl+F8) follows every native NR placement, including the post-upscale
+    // pass, so captures of the three placements can be compared against each other.
+    const bool nrAfterUpscale = NeuralRendering && !specializedNr && !nrBeforeUpscale && !denoiseFirst &&
+                                Config::Instance()->DlssNrEnabled.value_or_default();
+    const bool diagnoseNr = (nrBeforeUpscale || denoiseFirst || nrAfterUpscale) && !interop;
     if (diagnoseNr)
         NeuralRendering->DiagnosePipeline(0, InCommandList, InParameters, originalColor, GetFeatureFlags(),
                                           rayReconstruction);
@@ -343,13 +347,26 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         NeuralRendering->DenoiseFirstAfter(InCommandList, InParameters, currentTarget, evalResult);
     if (diagnoseNr)
         NeuralRendering->DiagnosePipeline(2, InCommandList, InParameters, currentTarget, GetFeatureFlags(),
-                                          rayReconstruction, evalResult);
+                                          rayReconstruction, evalResult, !nrAfterUpscale);
     SetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Color, originalColor);
 
-    if (!evalResult)
-        return false;
+    // Stage 3 must always close a frame that stage 2 left open, even when nothing ran.
+    const auto finishCapture = [&](bool dispatched)
+    {
+        if (diagnoseNr && nrAfterUpscale)
+            NeuralRendering->DiagnosePipeline(3, InCommandList, InParameters, paramOutput, GetFeatureFlags(),
+                                              rayReconstruction, dispatched);
+    };
 
-    if (!DispatchShaderPipeline(pipeline))
+    if (!evalResult)
+    {
+        finishCapture(false);
+        return false;
+    }
+
+    const bool dispatched = DispatchShaderPipeline(pipeline);
+    finishCapture(dispatched);
+    if (!dispatched)
         return true;
 
     // imgui

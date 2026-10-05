@@ -499,8 +499,11 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
     }
     else
     {
+        // Measured on The Witcher 3 (REDengine) 2026-10-05: the raw render correlates with the clean
+        // image shifted by MINUS the NGX jitter offset on every captured frame, and plus is worse
+        // than no shift at all. So the default direction is negative; "flip" selects positive.
         const bool shift = cfg.DlssNrDenoiseFirstShift.value_or_default();
-        const float sign = cfg.DlssNrDenoiseFirstFlipJitter.value_or_default() ? -1.0f : 1.0f;
+        const float sign = cfg.DlssNrDenoiseFirstFlipJitter.value_or_default() ? 1.0f : -1.0f;
         DlssNrConstants c {};
         c.Mode = 0;
         c.Width = g.w;
@@ -532,11 +535,10 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
         pending.handedOff = g.composite;
         pending.handedState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         handoff.color = g.composite;
-        char text[96];
-        std::snprintf(text, sizeof(text), " (%s, %s, shift %s%.3f,%.3f%s)", KernelName((int) c.DebugView),
-                      c.CompareMode ? "ratio" : "difference", shift ? "" : "off ", c.MvScaleX, c.MvScaleY,
-                      c.CompareSwap ? ", clamped" : "");
-        detail = text;
+        // No per-frame numbers here: the status is logged whenever it changes.
+        detail = std::string(" (") + KernelName((int) c.DebugView) + ", " + (c.CompareMode ? "ratio" : "difference") +
+                 ", jitter shift " + (shift ? (sign > 0 ? "on, flipped" : "on") : "off") +
+                 (c.CompareSwap ? ", clamped" : "") + ")";
     }
     pending.cmd = cmd;
     pending.caller = source;

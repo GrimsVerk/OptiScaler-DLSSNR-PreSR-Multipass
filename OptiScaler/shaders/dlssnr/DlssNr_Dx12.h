@@ -98,8 +98,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     void SetBufferState(ID3D12GraphicsCommandList* cmdList, D3D12_RESOURCE_STATES state);
     ID3D12Resource* Buffer();
     bool CanRender() const;
+    // Stages: 0 arms and records the raw colour, 1 what the upscaler receives, 2 the upscaler output,
+    // 3 the output after a post-upscale NR pass. Stage 2 closes the frame unless `last` is false.
     void DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
-                          ID3D12Resource* color, uint32_t flags, bool rr, bool success = true);
+                          ID3D12Resource* color, uint32_t flags, bool rr, bool success = true, bool last = true);
     void BeginInputHold(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                         const D3D12_RESOURCE_STATES* inputStates);
     void EndInputHold(NVSDK_NGX_Parameter* params);
