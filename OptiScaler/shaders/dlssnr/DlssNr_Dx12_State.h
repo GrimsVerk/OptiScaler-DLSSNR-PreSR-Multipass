@@ -369,8 +369,7 @@ struct DlssNr_Dx12::State
         DenoiseFirstHandoff Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, uint32_t featureFlags,
                                    unsigned long long submittedEpoch, ID3D12CommandQueue* queue,
                                    bool rayReconstruction);
-        void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, ID3D12Resource* output,
-                   bool upscaled);
+        void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, ID3D12Resource* output, bool upscaled);
         void ReleaseResources();
     };
     DenoiseFirstContext denoiseFirst { *this };

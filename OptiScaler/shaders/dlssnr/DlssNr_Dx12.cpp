@@ -375,8 +375,8 @@ DlssNr_Dx12::DenoiseFirstHandoff DlssNr_Dx12::DenoiseFirstBefore(ID3D12GraphicsC
     return _state->denoiseFirst.Before(cmd, params, featureFlags, submissionEpoch, queue, rayReconstruction);
 }
 
-void DlssNr_Dx12::DenoiseFirstAfter(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
-                                    ID3D12Resource* output, bool upscaled)
+void DlssNr_Dx12::DenoiseFirstAfter(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, ID3D12Resource* output,
+                                    bool upscaled)
 {
     std::lock_guard ownersLock(nrOwnersMutex);
     std::lock_guard stateLock(_state->mutex);
@@ -620,7 +620,7 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
                       << params << " rr " << rr << " feature_flags " << flags << '\n';
         const auto& cfg = *Config::Instance();
         job->metadata << "nr_placement "
-                      << (cfg.DlssNrDenoiseFirst.value_or_default() ? "denoise_first"
+                      << (cfg.DlssNrDenoiseFirst.value_or_default()  ? "denoise_first"
                           : cfg.DlssNrRunBeforeSr.value_or_default() ? "before_upscale"
                                                                      : "after_upscale")
                       << " white_point_source " << cfg.DlssNrWhitePointSource.value_or_default()

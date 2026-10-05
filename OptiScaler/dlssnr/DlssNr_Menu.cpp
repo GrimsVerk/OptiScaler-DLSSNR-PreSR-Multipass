@@ -175,8 +175,8 @@ void RenderMenu(Config* config, float menuResScale)
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(placement.deferred ? "The separate-edit path always generates before upscale."
-                              : denoiseFirstOn  ? "Denoise first decides the placement while it is on."
-                                                : "Run NR before the game's upscaler, including RR.");
+                              : denoiseFirstOn   ? "Denoise first decides the placement while it is on."
+                                                 : "Run NR before the game's upscaler, including RR.");
 
         if (PipelineUi::CheckboxWrapped("Apply NR to the finished picture", &finished, toggleWidth))
         {

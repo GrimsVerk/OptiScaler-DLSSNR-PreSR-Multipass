@@ -128,10 +128,9 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
                                                         rayReconstruction, submissionEpoch, interop, GetFeatureFlags());
     // Denoise first owns both ordinary seams on the native DX12 route: the game's upscaler at 1:1,
     // NR on that clean image, then a second step chosen in the menu. It replaces pre- and post-NR.
-    const bool denoiseFirst = NeuralRendering && !specializedNr && !interop &&
-                              Config::Instance()->DlssNrEnabled.value_or_default() &&
-                              Config::Instance()->DlssNrDenoiseFirst.value_or_default() &&
-                              DlssNr::CanRunBeforeUpscale_Dx12(InParameters);
+    const bool denoiseFirst =
+        NeuralRendering && !specializedNr && !interop && Config::Instance()->DlssNrEnabled.value_or_default() &&
+        Config::Instance()->DlssNrDenoiseFirst.value_or_default() && DlssNr::CanRunBeforeUpscale_Dx12(InParameters);
     const bool nrBeforeUpscale =
         NeuralRendering && !specializedNr && !denoiseFirst && Config::Instance()->DlssNrEnabled.value_or_default() &&
         Config::Instance()->DlssNrRunBeforeSr.value_or_default() && DlssNr::CanRunBeforeUpscale_Dx12(InParameters);

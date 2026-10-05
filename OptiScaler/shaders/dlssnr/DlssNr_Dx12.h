@@ -134,9 +134,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     std::string DenoiseStatus();
 
     // One pass of dlssnr_denoise_first.hlsl: raw render + (NR output, clean image) -> composite.
-    bool DispatchDenoiseFirstPass(ID3D12GraphicsCommandList* cmd, const DlssNrConstants& constants,
-                                  ID3D12Resource* raw, ID3D12Resource* model, ID3D12Resource* clean,
-                                  ID3D12Resource* target);
+    bool DispatchDenoiseFirstPass(ID3D12GraphicsCommandList* cmd, const DlssNrConstants& constants, ID3D12Resource* raw,
+                                  ID3D12Resource* model, ID3D12Resource* clean, ID3D12Resource* target);
 
     // Records one pass. Resources that a given mode does not read may be null; a stand-in is bound in
     // their place so every descriptor in the table is valid.
