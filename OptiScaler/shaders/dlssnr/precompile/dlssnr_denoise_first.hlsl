@@ -154,7 +154,19 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     float3 result;
     if (gCompareMode == 1)
-        result = raw.rgb * lerp(float3(1.0, 1.0, 1.0), edit, gTransferStrength);
+    {
+        // A path-traced sample far brighter than the clean value is a firefly, not a lit pixel. A
+        // multiplicative gain sized for the clean value would boost it (measured 1.3x to 1.6x on a
+        // dark floor, and the game's RR then kept some as sparkles). So the gain is applied in
+        // proportion to how far the sample is at or below the clean value: ordinary samples get the
+        // full ratio, a firefly gets the same absolute change the clean pixel would have received.
+        const float cleanLum = dot(Finite3(gOriginal.Load(int3(id.xy, 0)).rgb, float3(0.0, 0.0, 0.0)),
+                                   float3(0.2126, 0.7152, 0.0722));
+        const float rawLum = dot(max(raw.rgb, 0.0), float3(0.2126, 0.7152, 0.0722));
+        const float ordinary = saturate(max(cleanLum, 0.0) / max(rawLum, 1e-6));
+        const float3 gain = lerp(float3(1.0, 1.0, 1.0), edit, gTransferStrength);
+        result = raw.rgb * (1.0 + (gain - 1.0) * ordinary);
+    }
     else
         result = raw.rgb + edit * gTransferStrength;
 
