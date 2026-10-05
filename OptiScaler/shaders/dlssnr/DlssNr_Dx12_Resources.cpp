@@ -230,6 +230,7 @@ auto DlssNr_Dx12::State::ReleaseResources() -> void
     ReleaseEnlarger();
     enlargementStatus.clear();
     deferredSr.ReleaseResources();
+    denoiseFirst.ReleaseResources();
 
     lifetime.Collect();
 

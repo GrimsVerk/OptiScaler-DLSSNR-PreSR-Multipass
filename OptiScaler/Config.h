@@ -268,6 +268,22 @@ class Config
     CustomOptional<bool> DlssNrResidualAcrossRr { false };
     // RR history blend before private upscaling, clamped to 0.01..1.
     CustomOptional<float> DlssNrResidualAcrossRrBlend { 0.08f };
+    // Denoise first: run the game's own upscaler (RR when the game uses RR, else SR) at 1:1 on the
+    // raw render, run NR on that clean image, then hand the result on through one second step.
+    CustomOptional<bool> DlssNrDenoiseFirst { false };
+    // 0 game upscaler again on the NR'd clean image (zero jitter), 1 private DLSS SR on it (zero
+    // jitter), 2 NR's edit shifted by the jitter and added onto the raw render, then the game's upscale.
+    CustomOptional<int> DlssNrDenoiseFirstStep { 2 };
+    // Step 2 only. 0 difference (NR - clean, added), 1 ratio (NR / clean, multiplied).
+    CustomOptional<int> DlssNrDenoiseFirstEdit { 0 };
+    // Step 2 only. Resampling kernel for the shifted edit: 0 bilinear, 1 Catmull-Rom, 2 Lanczos 2.
+    CustomOptional<int> DlssNrDenoiseFirstKernel { 1 };
+    // Step 2 only. Shift the edit by the frame's jitter so it lines up with the raw render's samples.
+    CustomOptional<bool> DlssNrDenoiseFirstShift { true };
+    // Step 2 only. Flip the sign of that shift; engines disagree on the jitter convention.
+    CustomOptional<bool> DlssNrDenoiseFirstFlipJitter { false };
+    // Step 2 only. Clamp the resampled edit to its nearest source pixels, which removes ringing.
+    CustomOptional<bool> DlssNrDenoiseFirstNeighbourhoodClamp { false };
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
