@@ -668,6 +668,19 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
             auto result = params->Get(key, &value);
             job->metadata << key << ' ' << value << " get_result " << unsigned(result) << '\n';
         }
+        // Camera matrices, when RR supplies them, so a capture can express normals in view space.
+        for (const char* key : { "WorldToViewMatrix", "ViewToClipMatrix" })
+        {
+            void* matrix = nullptr;
+            params->Get(key, &matrix);
+            job->metadata << key;
+            if (matrix)
+                for (int i = 0; i < 16; ++i)
+                    job->metadata << ' ' << static_cast<const float*>(matrix)[i];
+            else
+                job->metadata << " missing";
+            job->metadata << '\n';
+        }
         // Record descriptors of optional RR inputs without assuming their presence.
         for (const char* key : { "DLSS.Input.DiffuseAlbedo", "DLSS.Input.SpecularAlbedo", "GBuffer.Normals",
                                  "GBuffer.Roughness", "MotionVectorsReflection", "DLSSD.SpecularHitDistance",
@@ -695,6 +708,14 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
         state.pipelineCapture->Copy(
             cmd, _device, "exposure",
             state.GetResource(params, NVSDK_NGX_Parameter_ExposureTexture, "DLSSD.ExposureTexture"), inputs.exposure);
+        // RR guides, when the game supplies them: they let a capture separate lighting from albedo
+        // (colour over albedo is irradiance) and relate it to surface orientation. Assumed readable,
+        // the same assumption the private RR upscaler makes of them.
+        for (const auto& [key, name] : { std::pair { "DLSS.Input.DiffuseAlbedo", "albedo" },
+                                         std::pair { "DLSS.Input.SpecularAlbedo", "specular_albedo" },
+                                         std::pair { "GBuffer.Normals", "normals" } })
+            if (auto* guide = state.GetResource(params, key, key))
+                state.pipelineCapture->Copy(cmd, _device, name, guide, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         return;
     }
     auto* job = state.pipelineCapture;
