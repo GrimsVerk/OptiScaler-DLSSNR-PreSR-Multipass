@@ -589,6 +589,7 @@ auto DlssNr_Dx12::State::DenoiseFirstContext::Before(ID3D12GraphicsCommandList* 
         c.MvScaleY = shift ? sign * jitterY : 0.0f;
         c.CompareMode = cfg.DlssNrDenoiseFirstEdit.value_or_default() == 1 ? 1u : 0u;
         c.CompareSwap = cfg.DlssNrDenoiseFirstNeighbourhoodClamp.value_or_default() ? 1u : 0u;
+        c.Passthrough = cfg.DlssNrDenoiseFirstFireflyGuard.value_or_default() ? 1u : 0u;
         ScopedNrStateEnvelope envelope(cmd);
         owner.Barrier(cmd, color, arrival, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         owner.Barrier(cmd, g.composite, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,

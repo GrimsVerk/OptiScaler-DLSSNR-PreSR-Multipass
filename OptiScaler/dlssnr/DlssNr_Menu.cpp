@@ -248,6 +248,17 @@ void RenderMenu(Config* config, float menuResScale)
                            "and only its brightness and tint move. Recommended.\nDifference adds NR - clean as an "
                            "absolute amount. On samples that came back dark that amount outweighs the sample, which "
                            "recolours them and roughly doubles the colour noise the upscaler receives.");
+                if (edit == 1)
+                {
+                    bool fireflies = config->DlssNrDenoiseFirstFireflyGuard.value_or_default();
+                    if (ImGui::Checkbox("Do not multiply fireflies", &fireflies))
+                        config->DlssNrDenoiseFirstFireflyGuard = fireflies;
+                    HelpMarker("A raw sample far brighter than the clean value is a path-tracing firefly, not a lit "
+                               "pixel. Multiplying it by the ratio makes it brighter, and when the camera is still "
+                               "the game's Ray Reconstruction can keep such sparkles in shadows. With this on, those "
+                               "samples get the absolute change their pixel would have had instead. Turn off to "
+                               "compare.");
+                }
 
                 bool shift = config->DlssNrDenoiseFirstShift.value_or_default();
                 if (ImGui::Checkbox("Shift the edit by the frame's jitter", &shift))

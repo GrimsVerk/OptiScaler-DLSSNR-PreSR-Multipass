@@ -349,6 +349,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrDenoiseFirstShift.set_from_config(readBool("DlssNr", "DenoiseFirstShift"));
             DlssNrDenoiseFirstFlipJitter.set_from_config(readBool("DlssNr", "DenoiseFirstFlipJitter"));
             DlssNrDenoiseFirstNeighbourhoodClamp.set_from_config(readBool("DlssNr", "DenoiseFirstNeighbourhoodClamp"));
+            DlssNrDenoiseFirstFireflyGuard.set_from_config(readBool("DlssNr", "DenoiseFirstFireflyGuard"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
@@ -1293,6 +1294,8 @@ bool Config::SaveIni(std::filesystem::path destination)
                      GetBoolValue(Instance()->DlssNrDenoiseFirstFlipJitter.value_for_config()).c_str());
         ini.SetValue("DlssNr", "DenoiseFirstNeighbourhoodClamp",
                      GetBoolValue(Instance()->DlssNrDenoiseFirstNeighbourhoodClamp.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstFireflyGuard",
+                     GetBoolValue(Instance()->DlssNrDenoiseFirstFireflyGuard.value_for_config()).c_str());
         ini.Delete("DlssNr", "ResidualFG");
         ini.Delete("DlssNr", "ResidualFGApproxCamera");
         ini.Delete("DlssNr", "UseProxy");

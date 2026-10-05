@@ -287,6 +287,9 @@ class Config
     CustomOptional<bool> DlssNrDenoiseFirstFlipJitter { false };
     // Step 2 only. Clamp the resampled edit to its nearest source pixels, which removes ringing.
     CustomOptional<bool> DlssNrDenoiseFirstNeighbourhoodClamp { false };
+    // Step 2, ratio only. Do not multiply samples far brighter than the clean value (fireflies); give
+    // them the absolute change their pixel would have had. Off = plain ratio, for comparison.
+    CustomOptional<bool> DlssNrDenoiseFirstFireflyGuard { true };
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };

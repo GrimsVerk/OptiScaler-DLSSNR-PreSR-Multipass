@@ -12,6 +12,7 @@
 //   gDebugView             kernel: 0 bilinear, 1 Catmull-Rom, 2 Lanczos 2
 //   gCompareMode           edit mode: 0 difference (added), 1 ratio (multiplied)
 //   gCompareSwap           1 = clamp the resampled edit to its 2x2 neighbourhood (anti-ringing)
+//   gPassthrough           1 = ratio mode does not multiply fireflies (samples far above the clean value)
 //   gTransferStrength      edit strength, 1 = as the model produced it
 //   gMaxRatio              ceiling for the ratio mode
 cbuffer Params : register(b0)
@@ -163,7 +164,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         const float cleanLum = dot(Finite3(gOriginal.Load(int3(id.xy, 0)).rgb, float3(0.0, 0.0, 0.0)),
                                    float3(0.2126, 0.7152, 0.0722));
         const float rawLum = dot(max(raw.rgb, 0.0), float3(0.2126, 0.7152, 0.0722));
-        const float ordinary = saturate(max(cleanLum, 0.0) / max(rawLum, 1e-6));
+        // gPassthrough carries the firefly-guard switch: 0 = plain ratio on every sample.
+        const float ordinary = gPassthrough != 0 ? saturate(max(cleanLum, 0.0) / max(rawLum, 1e-6)) : 1.0;
         const float3 gain = lerp(float3(1.0, 1.0, 1.0), edit, gTransferStrength);
         result = raw.rgb * (1.0 + (gain - 1.0) * ordinary);
     }
