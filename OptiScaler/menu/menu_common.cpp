@@ -368,6 +368,10 @@ inline void MenuCommon::ReInitUpscaler()
 
 void MenuCommon::SeparatorWithHelpMarker(const char* label, const char* tip)
 {
+    // SeparatorTextEx, unlike SeparatorText, draws even when the window is skipping its items.
+    if (ImGui::GetCurrentWindow()->SkipItems)
+        return;
+
     auto marker = "(?) ";
     ImGui::SeparatorTextEx(0, label, ImGui::FindRenderedTextEnd(label),
                            ImGui::CalcTextSize(marker, ImGui::FindRenderedTextEnd(marker)).x);
@@ -2728,7 +2732,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         // FFX -----------------
         if (!usesDlssd && (currentBackend == Upscaler::FFX || currentBackend == Upscaler::FFX_on12))
         {
-            ImGui::SeparatorText("FFX Settings");
+            MenuSection ffxSection("FFX Settings");
 
             if (_ffxUpscalerIndex < 0)
                 _ffxUpscalerIndex = config->FfxUpscalerIndex.value_or_default();
@@ -3033,10 +3037,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
             usesDlssd)
         {
 
-            if (usesDlssd)
-                ImGui::SeparatorText("DLSSD Settings");
-            else
-                ImGui::SeparatorText("DLSS Settings");
+            MenuSection dlssSection(usesDlssd ? "DLSSD Settings" : "DLSS Settings");
 
             auto overridden =
                 usesDlssd ? state.dlssdPresetsOverriddenExternally : state.dlssPresetsOverriddenExternally;
@@ -3544,8 +3545,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     if (state.activeFgInput != FGInput::ForceXeLL)
     {
-        ImGui::SeparatorText("Frame Generation");
-
+        // The "Frame Generation" header is the collapsible section opened by RenderMainMenuTable; it holds this
+        // selector and the per-backend settings that follow.
         if (ImGui::BeginTable("fgSelection", 2, ImGuiTableFlags_SizingStretchSame))
         {
             ImGui::TableNextColumn();
@@ -5178,7 +5179,7 @@ void MenuCommon::RenderFsrCommonSettings(RenderMenuContext& ctx)
         if (currentFeature != nullptr && !currentFeature->IsFrozen() &&
             (state.activeFgOutput == FGOutput::FSRFG || IsFsr(currentBackend)))
         {
-            SeparatorWithHelpMarker("FSR Common Settings", "Affects both FSR-FG & Upscalers");
+            MenuSection fsrCommonSection("FSR Common Settings", "Affects both FSR-FG & Upscalers");
 
             bool useFsrVales = config->FsrUseFsrInputValues.value_or_default();
             if (ImGui::Checkbox("Use FSR Input Values", &useFsrVales))
@@ -5276,7 +5277,7 @@ void MenuCommon::RenderFramerateSettings(RenderMenuContext& ctx)
     // Framerate ---------------------
     if (state.reflexLimitsFps || config->OverlayMenu.value_or_default())
     {
-        SeparatorWithHelpMarker(
+        MenuSection framerateSection(
             "Framerate", "Uses Reflex when possible\nOn AMD/Intel cards, you can use Fakenvapi to substitute Reflex");
 
         static std::string currentMethod {};
@@ -5394,7 +5395,7 @@ void MenuCommon::RenderFakenvapiSettings(RenderMenuContext& ctx)
     auto config = ctx.config;
 
     // FAKENVAPI ---------------------------
-    ImGui::SeparatorText("fakenvapi");
+    MenuSection fakenvapiSection("fakenvapi");
 
     // Using state.reflexLimitsFps as a detection for Reflex being used on Nvidia
     bool showLatencyFlex =
@@ -5481,7 +5482,7 @@ void MenuCommon::RenderLowLatencySettings(RenderMenuContext& ctx)
     auto config = ctx.config;
 
     // Low Latency ---------------------------
-    ImGui::SeparatorText("Low Latency");
+    MenuSection lowLatencySection("Low Latency");
 
     static std::vector<MenuOption<LowLatencyInput>> lowLatencyInput = {
         { LowLatencyInput::None, "None (Off)" },    { LowLatencyInput::Auto, "Auto" },
@@ -5582,8 +5583,12 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
 
     if (currentFeature != nullptr && !currentFeature->IsFrozen())
     {
+        // The sections in this block follow one another in one scope, so one slot holds whichever is current:
+        // emplace() closes the previous section before opening the next.
+        std::optional<MenuSection> section;
+
         // SHARPNESS -----------------------------
-        ImGui::SeparatorText("Sharpness");
+        section.emplace("Sharpness");
 
         if (bool overrideSharpness = config->OverrideSharpness.value_or_default();
             ImGui::Checkbox("Override", &overrideSharpness))
@@ -5843,7 +5848,7 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
         auto minSliderLimit = config->ExtendedLimits.value_or_default() ? 0.1f : 1.0f;
         auto maxSliderLimit = config->ExtendedLimits.value_or_default() ? 6.0f : 3.0f;
 
-        ImGui::SeparatorText("Upscale Ratio Override");
+        section.emplace("Upscale Ratio Override");
 
         if (bool upOverride = config->UpscaleRatioOverrideEnabled.value_or_default();
             ImGui::Checkbox("Override all", &upOverride))
@@ -5905,16 +5910,19 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
                 config->QualityRatio_UltraPerformance = qUp;
         }
 
+        section.reset();
+
         if (currentFeature != nullptr && !currentFeature->IsFrozen())
         {
             // OUTPUT SCALING -----------------------------
             // if (state.api == DX12 || state.api == DX11)
             {
+                // The header is opened before the disabled scope so it can always be clicked.
+                MenuSection outputScalingSection("Output Scaling");
+
                 // if motion vectors are not display size
                 ImGui::BeginDisabled(!currentFeature->LowResMV() &&
                                      currentFeature->RenderWidth() != currentFeature->DisplayWidth());
-
-                ImGui::SeparatorText("Output Scaling");
 
                 float defaultRatio = 1.5f;
 
@@ -6027,7 +6035,7 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
         }
 
         // INIT -----------------------------
-        ImGui::SeparatorText("Init Flags");
+        section.emplace("Init Flags");
         if (ImGui::BeginTable("init", 2, ImGuiTableFlags_SizingStretchProp))
         {
             ImGui::TableNextColumn();
@@ -7333,40 +7341,38 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
 
 void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 {
-    if (ImGui::BeginTable("main", 2, ImGuiTableFlags_SizingStretchSame))
-    {
-        ImGui::TableNextColumn();
+    // One column. "Upscalers" stays an always-visible header; every other section is a collapsible MenuSection
+    // (opened inside the Render* functions), closed by default like the headers further down.
 
-        // Left column: active upscaler state, frame generation, FSR common, latency and fakenvapi controls.
-        RenderActiveUpscalerSettings(ctx);
+    // Active upscaler state, frame generation, FSR common, latency and fakenvapi controls.
+    RenderActiveUpscalerSettings(ctx);
+    {
+        // One drop-down for the FG selector and the settings of whichever FG backend is active.
+        MenuSection frameGenerationSection("Frame Generation");
         RenderFrameGenerationSelection(ctx);
         RenderFrameGenerationRuntimeSettings(ctx);
-        RenderFsrCommonSettings(ctx);
-        RenderFramerateSettings(ctx);
+    }
+    RenderFsrCommonSettings(ctx);
+    RenderFramerateSettings(ctx);
 #ifdef LOW_LATENCY_INPUTS
-        RenderLowLatencySettings(ctx);
+    RenderLowLatencySettings(ctx);
 #else
-        RenderFakenvapiSettings(ctx);
+    RenderFakenvapiSettings(ctx);
 #endif
 
-        ImGui::TableNextColumn();
-
-        // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
-        RenderActiveImageSettings(ctx);
-        DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
-        RenderMagnifierSettings(ctx);
-        RenderQuirksSettings(ctx);
-        RenderAdvancedSettings(ctx);
-        RenderLoggingSettings(ctx);
-        RenderProfilesSettings(ctx);
-        RenderThemeSettings(ctx);
-        RenderFpsOverlaySettings(ctx);
-        RenderUpscalerInputsSettings(ctx);
-        RenderApiAndTextureSettings(ctx);
-        RenderKeybindSettings(ctx);
-
-        ImGui::EndTable();
-    }
+    // Image quality, initialization, advanced options, appearance, overlay and input settings.
+    RenderActiveImageSettings(ctx);
+    DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
+    RenderMagnifierSettings(ctx);
+    RenderQuirksSettings(ctx);
+    RenderAdvancedSettings(ctx);
+    RenderLoggingSettings(ctx);
+    RenderProfilesSettings(ctx);
+    RenderThemeSettings(ctx);
+    RenderFpsOverlaySettings(ctx);
+    RenderUpscalerInputsSettings(ctx);
+    RenderApiAndTextureSettings(ctx);
+    RenderKeybindSettings(ctx);
 }
 
 void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
@@ -7380,9 +7386,8 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (ImGui::BeginTable("plots", 2, ImGuiTableFlags_SizingStretchSame))
+    // Always visible, one above the other: frame time, then upscaler time.
     {
-        ImGui::TableNextColumn();
         ImGui::Text("FrameTime");
         auto ft = StrFmt("%7.2f ms / %6.1f fps", frameTime, frameRate);
         ImGui::PlotLines(
@@ -7391,7 +7396,7 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
 
         if (currentFeature != nullptr && !currentFeature->IsFrozen())
         {
-            ImGui::TableNextColumn();
+            ImGui::Spacing();
             ImGui::Text("Upscaler");
 
             ImGui::SameLine();
@@ -7466,8 +7471,6 @@ void MenuCommon::RenderMainMenuGraphs(RenderMenuContext& ctx)
                 ups.c_str(), [](void* rb, int idx) -> float
                 { return static_cast<RingBuffer<float, plotWidth>*>(rb)->At(idx); }, &gUpscalerTimes, plotWidth);
         }
-
-        ImGui::EndTable();
     }
 }
 
@@ -7495,10 +7498,9 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
         ImGui::SameLine(0.0f, 4.0f);
 
         ImGui::Text("%d", currentFeature->FrameCount());
-
-        ImGui::SameLine(0.0f, 10.0f);
     }
 
+    // The controls sit on their own row: with one column the bar no longer fits on a single line.
     ImGui::PushItemWidth(100.0f * menuResScale);
 
     auto autoText = config->MenuScale.has_value() ? "Auto" : StrFmt("Auto (%3.1f)", menuResScale);
@@ -7561,7 +7563,7 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
     textSize.x += style.ItemSpacing.x;
 
     float avail = ImGui::GetContentRegionAvail().x;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - textSize.x);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, avail - textSize.x));
 
     // Make button text underline
     if (ImGui::Button("Open Wiki"))
@@ -7753,7 +7755,7 @@ void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags
             textSize.x += ImGui::GetStyle().FramePadding.x * 5.0f + spacing; // 2 sides * 2 buttons + 1
 
             float avail = ImGui::GetContentRegionAvail().x;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - textSize.x);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, avail - textSize.x));
 
             if (ImGui::Button("Use Value"))
             {
@@ -7905,7 +7907,9 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
     const ImGuiWindowFlags utilityFlags = flags | ImGuiWindowFlags_AlwaysAutoResize;
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
     if (screen.x > 0.0f && screen.y > 0.0f)
-        ImGui::SetNextWindowSizeConstraints({ std::min(320.0f * menuResScale, screen.x),
+        // 620 at scale 1.0 is the width one column had in the two-column layout. Closed sections add no width
+        // of their own, so without this floor the fitted window would change width as sections open and close.
+        ImGui::SetNextWindowSizeConstraints({ std::min(620.0f * menuResScale, screen.x),
                                               std::min(200.0f * menuResScale, screen.y) },
                                             screen);
     const auto overBorderZone = [&](const ImRect& rect)
