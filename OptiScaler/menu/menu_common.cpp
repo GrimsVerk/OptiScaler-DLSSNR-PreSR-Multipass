@@ -7892,10 +7892,39 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         frameRate = 1000.0 / frameTime;
     }
 
+    // The main window fits its content every frame, as it always did, but never larger than the screen (it
+    // scrolls instead), and only until the user drags an edge or corner. From then on it keeps the user's size.
+    // Double-clicking an edge or corner goes back to fitting. ImGui ignores the resize grips on a frame that is
+    // being fitted, so fitting pauses while the pointer is over the border zone; that is what lets a drag start.
+    // The small utility windows keep fitting themselves.
+    static bool menuUserSized = false;
+    static ImRect lastMenuRect {};
     ImGuiWindowFlags flags = 0;
     flags |= ImGuiWindowFlags_NoSavedSettings;
     flags |= ImGuiWindowFlags_NoCollapse;
-    flags |= ImGuiWindowFlags_AlwaysAutoResize;
+    const ImGuiWindowFlags utilityFlags = flags | ImGuiWindowFlags_AlwaysAutoResize;
+    const ImVec2 screen = ImGui::GetIO().DisplaySize;
+    if (screen.x > 0.0f && screen.y > 0.0f)
+        ImGui::SetNextWindowSizeConstraints({ std::min(320.0f * menuResScale, screen.x),
+                                              std::min(200.0f * menuResScale, screen.y) },
+                                            screen);
+    const auto overBorderZone = [&](const ImRect& rect)
+    {
+        if (rect.GetWidth() <= 0.0f || rect.GetHeight() <= 0.0f)
+            return false;
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        const float pad = std::max(8.0f * menuResScale, 10.0f);
+        const float grip = std::max(32.0f * menuResScale, 24.0f); // the corner grips reach further in
+        ImRect outer = rect, inner = rect;
+        outer.Expand(pad);
+        inner.Expand(-pad);
+        if (!outer.Contains(mouse))
+            return false;
+        const bool nearX = mouse.x < rect.Min.x + grip || mouse.x > rect.Max.x - grip;
+        const bool nearY = mouse.y < rect.Min.y + grip || mouse.y > rect.Max.y - grip;
+        return !inner.Contains(mouse) || (nearX && nearY);
+    };
+    const bool fitThisFrame = !menuUserSized && !overBorderZone(lastMenuRect);
 
     if (lastMenuScale != menuResScale)
     {
@@ -7913,7 +7942,12 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
         style.MouseCursorScale = 1.0f;
         CopyMemory(style.Colors, styleold.Colors, sizeof(style.Colors)); // Restore colors
 
-        ImGui::SetNextWindowSize({ 1.0f, 1.0f });
+        menuUserSized = false; // a user size chosen at the old scale no longer fits anything
+        ImGui::SetNextWindowSize({ 0.0f, 0.0f }); // zero on an axis = fit that axis to the content
+    }
+    else if (fitThisFrame)
+    {
+        ImGui::SetNextWindowSize({ 0.0f, 0.0f });
     }
 
     // Main menu window
@@ -7926,6 +7960,23 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
 
     if (ImGui::Begin(windowTitle.c_str(), NULL, flags))
     {
+        // A held edge or corner means the user is sizing the window: stop fitting from here on.
+        if (ImGuiWindow* window = ImGui::GetCurrentWindow())
+        {
+            lastMenuRect = window->Rect();
+            if (const ImGuiID active = ImGui::GetActiveID(); active != 0)
+            {
+                bool sizing = false;
+                for (int n = 0; n < 4; n++)
+                    sizing |= active == ImGui::GetWindowResizeCornerID(window, n) ||
+                              active == ImGui::GetWindowResizeBorderID(window, (ImGuiDir) n);
+                if (sizing)
+                    menuUserSized = true;
+            }
+            if (menuUserSized && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && overBorderZone(lastMenuRect))
+                menuUserSized = false;
+        }
+
         // Header/status messages shown above the two-column settings table.
         RenderMainMenuHeaderMessages(ctx);
 
@@ -7940,8 +7991,8 @@ void MenuCommon::RenderMainMenuWindow(RenderMenuContext& ctx)
     }
 
     // Detached utility windows owned by the main menu.
-    RenderMipmapBiasWindow(ctx, flags);
-    RenderHudlessResourcesWindow(ctx, flags);
+    RenderMipmapBiasWindow(ctx, utilityFlags);
+    RenderHudlessResourcesWindow(ctx, utilityFlags);
 
     if (config->UseHQFont.value_or_default())
         ImGui::PopFontSize();
