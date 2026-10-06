@@ -291,6 +291,18 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::Spacing();
         }
 
+        // "Generate model before upscale" and denoise first both drop back to after-upscale NR when the game's
+        // colour input is one they cannot read. Without this line the only sign is an unchanged frame time.
+        if (const auto blocker = DlssNr::BeforeUpscaleBlocker(); enabled && !blocker.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.2f, 1.0f));
+            ImGui::TextWrapped("NR before the upscale cannot run in this game: %s. NR is running after the upscale "
+                               "instead.",
+                               blocker.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+        }
+
         // placement is current: nothing it depends on changes in the denoise-first block above.
         const bool nativePrivateVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
         if (placement.deferred && !nativePrivateVk)

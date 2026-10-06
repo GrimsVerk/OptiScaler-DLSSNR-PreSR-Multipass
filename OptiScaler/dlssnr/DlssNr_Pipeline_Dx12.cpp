@@ -60,6 +60,79 @@ bool DlssNr::CanRunBeforeUpscale_Dx12(NVSDK_NGX_Parameter* parameters)
     return desc.MipLevels == 1 && DlssNr::PreSrColorExtent(desc, width, height).has_value();
 }
 
+namespace
+{
+std::mutex beforeUpscaleBlockerMutex;
+std::string beforeUpscaleBlocker;
+
+// Mirrors CanRunBeforeUpscale_Dx12 condition by condition, naming the first one that fails.
+std::string DescribeBeforeUpscaleBlocker(NVSDK_NGX_Parameter* parameters)
+{
+    char text[200] {};
+    auto* color = NrResource(parameters, NVSDK_NGX_Parameter_Color, "DLSSD.Color");
+    if (color == nullptr)
+        return "the game passes no colour input";
+    unsigned int x = 0, y = 0;
+    parameters->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, &x);
+    parameters->Get(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, &y);
+    if (x != 0 || y != 0)
+    {
+        snprintf(text, sizeof(text), "the upscaler output starts at an offset (%u, %u) inside its texture", x, y);
+        return text;
+    }
+    x = y = 0;
+    parameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &x);
+    parameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &y);
+    if (x != 0 || y != 0)
+    {
+        snprintf(text, sizeof(text), "the colour input starts at an offset (%u, %u) inside its texture", x, y);
+        return text;
+    }
+    unsigned int width = 0, height = 0;
+    parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &width);
+    parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height);
+    const auto desc = color->GetDesc();
+    if (desc.MipLevels != 1)
+    {
+        snprintf(text, sizeof(text), "the colour input has %u mip levels (%llux%u, format %d); only single-level "
+                                     "textures are handled",
+                 (unsigned) desc.MipLevels, (unsigned long long) desc.Width, desc.Height, (int) desc.Format);
+        return text;
+    }
+    if (!DlssNr::PreSrColorExtent(desc, width, height).has_value())
+    {
+        snprintf(text, sizeof(text), "render size %ux%u does not fit the colour input (%llux%u, dimension %d, "
+                                     "samples %u, array size %u)",
+                 width, height, (unsigned long long) desc.Width, desc.Height, (int) desc.Dimension,
+                 desc.SampleDesc.Count, (unsigned) desc.DepthOrArraySize);
+        return text;
+    }
+    return {};
+}
+} // namespace
+
+void DlssNr::NoteBeforeUpscaleRequest_Dx12(bool requested, NVSDK_NGX_Parameter* parameters)
+{
+    // The common case costs one bool test and one empty-string compare.
+    std::string reason;
+    if (requested && !CanRunBeforeUpscale_Dx12(parameters))
+        reason = DescribeBeforeUpscaleBlocker(parameters);
+    std::lock_guard lock(beforeUpscaleBlockerMutex);
+    if (reason == beforeUpscaleBlocker)
+        return;
+    beforeUpscaleBlocker = std::move(reason);
+    if (beforeUpscaleBlocker.empty())
+        LOG_INFO("NR before upscale: available again");
+    else
+        LOG_WARN("NR before upscale cannot run, falling back to after upscale: {}", beforeUpscaleBlocker);
+}
+
+std::string DlssNr::BeforeUpscaleBlocker()
+{
+    std::lock_guard lock(beforeUpscaleBlockerMutex);
+    return beforeUpscaleBlocker;
+}
+
 DlssNr::InputStates_Dx12 DlssNr::ResolveInputStates_Dx12(bool interop)
 {
     constexpr auto readable = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;

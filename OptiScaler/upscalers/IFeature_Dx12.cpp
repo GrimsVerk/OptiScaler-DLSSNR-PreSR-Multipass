@@ -134,6 +134,12 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     const bool nrBeforeUpscale =
         NeuralRendering && !specializedNr && !denoiseFirst && Config::Instance()->DlssNrEnabled.value_or_default() &&
         Config::Instance()->DlssNrRunBeforeSr.value_or_default() && DlssNr::CanRunBeforeUpscale_Dx12(InParameters);
+    // Both placements above fall back to after-upscale NR when the game's inputs are unsupported; say why.
+    DlssNr::NoteBeforeUpscaleRequest_Dx12(
+        NeuralRendering && !specializedNr && Config::Instance()->DlssNrEnabled.value_or_default() &&
+            (Config::Instance()->DlssNrDenoiseFirst.value_or_default() ||
+             Config::Instance()->DlssNrRunBeforeSr.value_or_default()),
+        InParameters);
 
     // Order is important as that's the order of shader dispatch
     ShaderPipeline_Dx12 pipeline;

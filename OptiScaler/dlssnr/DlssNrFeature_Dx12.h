@@ -27,6 +27,9 @@ void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE 
 
 std::string DeferredDlssStatus();
 std::string DenoiseFirstStatus();
+// Why a requested before-upscale placement is not running on DX12 (empty when it runs or is not requested).
+// The placement otherwise falls back to after-upscale NR without any visible sign.
+std::string BeforeUpscaleBlocker();
 // Outside DllMain only. Returns false rather than releasing a runtime with unresolved owners/work.
 bool Shutdown();
 } // namespace DlssNr
