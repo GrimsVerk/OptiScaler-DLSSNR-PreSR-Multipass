@@ -759,6 +759,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             RoundInternalResolution.set_from_config(readInt("Hotfix", "RoundInternalResolution"));
 
             RestoreComputeSignature.set_from_config(readBool("Hotfix", "RestoreComputeSignature"));
+            WndProcSubclass.set_from_config(readBool("Hotfix", "WndProcSubclass"));
             RestoreGraphicSignature.set_from_config(readBool("Hotfix", "RestoreGraphicSignature"));
             ExtendedStateRestore.set_from_config(readBool("Hotfix", "ExtendedStateRestore"));
             PreferDedicatedGpu.set_from_config(readBool("Hotfix", "PreferDedicatedGpu"));
@@ -1657,6 +1658,9 @@ bool Config::SaveIni(std::filesystem::path destination)
 
         ini.SetValue("Hotfix", "RestoreComputeSignature",
                      GetBoolValue(Instance()->RestoreComputeSignature.value_for_config()).c_str());
+        ini.SetValue("Hotfix", "WndProcSubclass",
+                     GetBoolValue(Instance()->WndProcSubclass.value_for_config()).c_str());
+
         ini.SetValue("Hotfix", "RestoreGraphicSignature",
                      GetBoolValue(Instance()->RestoreGraphicSignature.value_for_config()).c_str());
         ini.SetValue("Hotfix", "ExtendedStateRestore",

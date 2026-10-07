@@ -871,12 +871,27 @@ bool Initialize(const InitializeOptions& options)
     return hooksInstalled;
 }
 
+// REFramework subclasses the game window first and later re-subclasses on top of whatever is there. Our
+// GWLP_WNDPROC hook then wraps REF while REF wraps us, and every message recurses until the stack overflows
+// (RE4 with the pd-upscaler REF). The message and raw-input hooks still feed the menu without the subclass.
+static bool WndProcSubclassAllowed()
+{
+    const auto& setting = Config::Instance()->WndProcSubclass;
+    const bool allowed = setting.has_value()
+                             ? setting.value()
+                             : !std::filesystem::exists(Util::ExePath().parent_path() / L"reframework");
+
+    LOG_INFO("WndProc subclass {} ({})", allowed ? "enabled" : "disabled",
+             setting.has_value() ? "ini" : "auto, REFramework check");
+    return allowed;
+}
+
 bool Initialize(HWND targetHwnd, bool isUwp)
 {
     InitializeOptions options {};
     options.TargetHwnd = targetHwnd;
     options.IsUwp = isUwp;
-    options.UseWndProcSubclass = true;
+    options.UseWndProcSubclass = WndProcSubclassAllowed();
 
     return Initialize(options);
 }
@@ -887,7 +902,7 @@ bool Initialize(HWND targetHwnd, HWND inputHwnd, bool isUwp)
     options.TargetHwnd = targetHwnd;
     options.InputHwnd = inputHwnd;
     options.IsUwp = isUwp;
-    options.UseWndProcSubclass = true;
+    options.UseWndProcSubclass = WndProcSubclassAllowed();
 
     return Initialize(options);
 }

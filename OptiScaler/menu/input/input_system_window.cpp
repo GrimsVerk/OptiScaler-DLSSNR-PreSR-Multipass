@@ -429,7 +429,15 @@ void ValidateWindowSubclassLocked()
         return;
 
     const WNDPROC previousOriginalWndProc = _state.OriginalWndProc;
-    const bool restoredToOriginalWndProc = currentWndProc == previousOriginalWndProc;
+
+    // GetWindowLongPtrW returns a thunk handle (0xFFFFxxxx on x64), not a code address, when the stored WndProc
+    // is ANSI. Another component's ANSI subclass can then report the same handle as the proc we wrapped, so an
+    // equal value proves nothing: reinstalling on top of it creates the Opti -> other -> Opti recursion
+    // (REFramework in RE4: stack overflow ~30 s in). Only trust the comparison for real code addresses.
+    const auto isThunkHandle = [](WNDPROC proc)
+    { return (reinterpret_cast<std::uintptr_t>(proc) & ~std::uintptr_t(0xFFFF)) == std::uintptr_t(0xFFFF0000); };
+    const bool restoredToOriginalWndProc = currentWndProc == previousOriginalWndProc &&
+                                           !isThunkHandle(currentWndProc) && !isThunkHandle(previousOriginalWndProc);
 
     LOG_WARN("subclass lost input:{} currentWndProc:{} previousOriginal:{} restoredToOriginal:{}",
              static_cast<void*>(_state.InputHwnd), reinterpret_cast<std::uintptr_t>(currentWndProc),

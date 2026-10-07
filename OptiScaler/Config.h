@@ -546,6 +546,7 @@ class Config
 
     CustomOptional<int, NoDefault> SkipFirstFrames; // disabled by default
     CustomOptional<bool> RestoreComputeSignature { false };
+    CustomOptional<bool, NoDefault> WndProcSubclass; // auto: off when REFramework is installed
     CustomOptional<bool> RestoreGraphicSignature { false };
     CustomOptional<bool> ExtendedStateRestore { false };
 
