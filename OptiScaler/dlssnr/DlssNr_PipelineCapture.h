@@ -59,7 +59,9 @@ struct PipelineCaptureFrame
         const bool format = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
                             desc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT || desc.Format == DXGI_FORMAT_R32_FLOAT ||
                             desc.Format == DXGI_FORMAT_R16_FLOAT || desc.Format == DXGI_FORMAT_R16G16_FLOAT ||
-                            desc.Format == DXGI_FORMAT_R32G32_FLOAT || desc.Format == DXGI_FORMAT_R11G11B10_FLOAT;
+                            desc.Format == DXGI_FORMAT_R32G32_FLOAT || desc.Format == DXGI_FORMAT_R11G11B10_FLOAT ||
+                            desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                            desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM; // RR albedo guides
         if (!format || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.SampleDesc.Count != 1 ||
             desc.MipLevels != 1 || desc.DepthOrArraySize != 1)
         {
