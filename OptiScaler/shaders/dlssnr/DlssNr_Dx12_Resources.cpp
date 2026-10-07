@@ -112,7 +112,7 @@ auto DlssNr_Dx12::State::Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resou
     D3D12_RESOURCE_BARRIER b {};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource = res;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.Subresource = DlssNr::TransitionSubresource(res);
     b.Transition.StateBefore = from;
     b.Transition.StateAfter = to;
     cmdList->ResourceBarrier(1, &b);
@@ -150,6 +150,7 @@ auto DlssNr_Dx12::State::CreateGuideClone(ID3D12Device* device, ID3D12Resource* 
     D3D12_RESOURCE_DESC desc = source->GetDesc();
     desc.Format = TypedGuideFormat(desc.Format);
     desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    desc.MipLevels = 1; // only the top level is ever read; ReadableGuide copies just that one from a mip chain
 
     D3D12_HEAP_PROPERTIES heap {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -193,7 +194,18 @@ auto DlssNr_Dx12::State::ReadableGuide(ID3D12Device* device, ID3D12GraphicsComma
     }
 
     Barrier(cmdList, source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cmdList->CopyResource(*clone, source);
+    if (source->GetDesc().MipLevels > 1)
+    {
+        // The clone has one level and only the source's top level was made a copy source.
+        D3D12_TEXTURE_COPY_LOCATION from {}, to {};
+        from.pResource = source;
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        to.pResource = *clone;
+        to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cmdList->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    }
+    else
+        cmdList->CopyResource(*clone, source);
     Barrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     Barrier(cmdList, *clone, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     return *clone;

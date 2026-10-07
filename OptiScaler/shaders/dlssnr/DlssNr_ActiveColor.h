@@ -11,6 +11,16 @@ struct ColorExtent
     unsigned int height;
 };
 
+// The subresource a state change on this texture should name. NR only ever reads, copies or writes the top mip
+// level. A game texture with a mip chain (Alan Wake 2 passes its scene colour with 11 levels) may keep the lower
+// levels in a different state than the top one, so changing the state of the whole resource from one assumed
+// state is invalid there; level 0 alone is what NR touches and what it may assume a state for. A single-level
+// texture is transitioned whole, exactly as before, which also keeps both planes of a depth-stencil together.
+inline UINT TransitionSubresource(ID3D12Resource* resource)
+{
+    return resource != nullptr && resource->GetDesc().MipLevels > 1 ? 0u : D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+}
+
 // NGX reports the active image separately from the allocation. No preset names or standard
 // resolutions belong here. Non-zero origins still need a separate guide/colour-offset integration.
 inline std::optional<ColorExtent> PreSrColorExtent(const D3D12_RESOURCE_DESC& allocation, unsigned int renderWidth,

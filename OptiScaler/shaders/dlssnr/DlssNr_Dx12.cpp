@@ -181,7 +181,22 @@ bool DlssNr_Dx12::DispatchCompute(ID3D12GraphicsCommandList* InCmdList, const Dl
         for (uint32_t i = 0; i < kSrvCount; ++i)
         {
             // Copied depth guides already use an SRV format; the upstream translator maps it back to a DSV.
-            const bool translate = srvs[i]->GetDesc().Format != DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+            const auto desc = srvs[i]->GetDesc();
+            const bool translate = desc.Format != DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+            if (desc.MipLevels > 1 && desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                desc.DepthOrArraySize == 1)
+            {
+                // A game texture with a mip chain: the shaders read level 0 only, and only level 0 is put in a
+                // readable state (see TransitionSubresource), so the view must not reach the lower levels.
+                D3D12_SHADER_RESOURCE_VIEW_DESC view {};
+                view.Format = translate ? TranslateTypelessFormats(desc.Format) : desc.Format;
+                view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                view.Texture2D.MostDetailedMip = 0;
+                view.Texture2D.MipLevels = 1;
+                _device->CreateShaderResourceView(srvs[i], &view, currentHeap.GetSrvCPU(i));
+                continue;
+            }
             CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i), DXGI_FORMAT_UNKNOWN, translate);
         }
 

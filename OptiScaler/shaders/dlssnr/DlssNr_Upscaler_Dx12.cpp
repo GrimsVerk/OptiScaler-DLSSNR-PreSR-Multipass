@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DlssNr_Upscaler_Dx12.h"
+#include "DlssNr_ActiveColor.h"
 #include <proxies/NVNGX_Proxy.h>
 #include <cstring>
 #include <cmath>
@@ -105,7 +106,7 @@ struct PrivateUpscalerDx12::Impl
             return;
         D3D12_RESOURCE_BARRIER b {};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition = { resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after };
+        b.Transition = { resource, DlssNr::TransitionSubresource(resource), before, after };
         cmd->ResourceBarrier(1, &b);
     }
 

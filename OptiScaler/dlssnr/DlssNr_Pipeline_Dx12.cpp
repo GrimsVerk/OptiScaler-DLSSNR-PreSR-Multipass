@@ -42,7 +42,7 @@ void NrBarrier(ID3D12GraphicsCommandList* commandList, ID3D12Resource* resource,
 {
     if (resource == nullptr || before == after)
         return;
-    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, before, after);
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, before, after, DlssNr::TransitionSubresource(resource));
     commandList->ResourceBarrier(1, &barrier);
 }
 
@@ -56,8 +56,9 @@ bool DlssNr::CanRunBeforeUpscale_Dx12(NVSDK_NGX_Parameter* parameters)
     unsigned int width = 0, height = 0;
     parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &width);
     parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height);
-    const auto desc = color->GetDesc();
-    return desc.MipLevels == 1 && DlssNr::PreSrColorExtent(desc, width, height).has_value();
+    // A mip chain is accepted: NR copies and reads the top level only, and every state change and view on
+    // such a texture names that level alone (DlssNr::TransitionSubresource).
+    return DlssNr::PreSrColorExtent(color->GetDesc(), width, height).has_value();
 }
 
 namespace
@@ -92,13 +93,6 @@ std::string DescribeBeforeUpscaleBlocker(NVSDK_NGX_Parameter* parameters)
     parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &width);
     parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height);
     const auto desc = color->GetDesc();
-    if (desc.MipLevels != 1)
-    {
-        snprintf(text, sizeof(text), "the colour input has %u mip levels (%llux%u, format %d); only single-level "
-                                     "textures are handled",
-                 (unsigned) desc.MipLevels, (unsigned long long) desc.Width, desc.Height, (int) desc.Format);
-        return text;
-    }
     if (!DlssNr::PreSrColorExtent(desc, width, height).has_value())
     {
         snprintf(text, sizeof(text), "render size %ux%u does not fit the colour input (%llux%u, dimension %d, "

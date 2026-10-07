@@ -64,8 +64,9 @@ struct ReadbackImage
     {
         D3D12_RESOURCE_BARRIER barrier {};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition = { source, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, state,
-                               D3D12_RESOURCE_STATE_COPY_SOURCE };
+        // Level 0 is all that is copied; on a mip chain the lower levels' states are not ours to assume.
+        const UINT subresource = source->GetDesc().MipLevels > 1 ? 0u : D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition = { source, subresource, state, D3D12_RESOURCE_STATE_COPY_SOURCE };
         if (state != D3D12_RESOURCE_STATE_COPY_SOURCE)
             cmd->ResourceBarrier(1, &barrier);
         D3D12_TEXTURE_COPY_LOCATION from {};

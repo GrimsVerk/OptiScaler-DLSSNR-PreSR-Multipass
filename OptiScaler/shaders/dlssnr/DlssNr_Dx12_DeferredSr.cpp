@@ -153,7 +153,8 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
     const auto active =
         DlssNr::PreSrColorExtent(inDesc, UInt(source, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width),
                                  UInt(source, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height));
-    if (!active || !DlssNr::PreSrColorExtent(outDesc, 0, 0) || inDesc.MipLevels != 1 || active->width > outDesc.Width ||
+    // inDesc may carry a mip chain; only its top level is read (DlssNr::TransitionSubresource).
+    if (!active || !DlssNr::PreSrColorExtent(outDesc, 0, 0) || active->width > outDesc.Width ||
         active->height > outDesc.Height)
     {
         Say("inactive: unsupported active input/output dimensions");
