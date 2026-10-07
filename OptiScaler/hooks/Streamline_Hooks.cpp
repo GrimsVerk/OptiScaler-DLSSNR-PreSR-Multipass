@@ -21,6 +21,28 @@
 #include <sl1_reflex.h>
 #include <magic_enum.hpp>
 #include "detours/detours.h"
+#include <chrono>
+#include <thread>
+
+// Detours allows one pending transaction per process. Streamline loads its plugins on worker threads, so a
+// plugin hook can race another thread's transaction; DetourTransactionBegin then fails with
+// ERROR_INVALID_OPERATION (0x10DD) and the following attach/commit act on nothing. Seen on Forza Horizon 6:
+// "Failed to hook DLSS: 10DD", then Streamline faulted and the game reported DLSS as unsupported. Wait for
+// the other transaction instead.
+static LONG BeginSlTransaction()
+{
+    LONG result = NO_ERROR;
+    for (int attempt = 0; attempt < 2000; ++attempt)
+    {
+        result = DetourTransactionBegin();
+        if (result != ERROR_INVALID_OPERATION)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (result != NO_ERROR)
+        LOG_ERROR("DetourTransactionBegin failed: {:X}", result);
+    return result;
+}
 
 static bool IsSL1AndDLSSGActive()
 {
@@ -1737,7 +1759,7 @@ void StreamlineHooks::hkcommon_slSetParameters_sl1(void* params)
         // It's flipped, 0 -> set void*, 7 -> get void*
         o_setVoid = (PFN_setVoid) vtable[0];
 
-        DetourTransactionBegin();
+        BeginSlTransaction();
         DetourUpdateThread(GetCurrentThread());
 
         if (o_setVoid != nullptr)
@@ -1829,7 +1851,7 @@ void StreamlineHooks::unhookInterposer()
 {
     LOG_FUNC();
 
-    DetourTransactionBegin();
+    BeginSlTransaction();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_slSetTag)
@@ -1964,7 +1986,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
             if (o_slInit != nullptr)
             {
                 LOG_TRACE("Hooking v2");
-                DetourTransactionBegin();
+                BeginSlTransaction();
                 DetourUpdateThread(GetCurrentThread());
 
                 DetourAttach(&(PVOID&) o_slInit, hkslInit);
@@ -2050,7 +2072,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
             if (o_slInit_sl1 || o_slSetTag_sl1 || o_slSetConstants_interposer_sl1 || o_slEvaluateFeature_sl1)
             {
                 LOG_TRACE("Hooking v1");
-                DetourTransactionBegin();
+                BeginSlTransaction();
                 DetourUpdateThread(GetCurrentThread());
 
                 if (o_slInit_sl1)
@@ -2090,7 +2112,7 @@ void StreamlineHooks::unhookDlss()
 {
     LOG_FUNC();
 
-    DetourTransactionBegin();
+    BeginSlTransaction();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_dlss_slGetPluginFunction)
@@ -2126,7 +2148,7 @@ void StreamlineHooks::hookDlss(HMODULE slDlss)
     if (o_dlss_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.dlss");
-        DetourTransactionBegin();
+        BeginSlTransaction();
         DetourUpdateThread(GetCurrentThread());
 
         DetourAttach(&(PVOID&) o_dlss_slGetPluginFunction, hkdlss_slGetPluginFunction);
@@ -2146,7 +2168,7 @@ void StreamlineHooks::unhookDlssg()
 {
     LOG_FUNC();
 
-    DetourTransactionBegin();
+    BeginSlTransaction();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_dlssg_slGetPluginFunction)
@@ -2184,7 +2206,7 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
     if (o_dlssg_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.dlssg");
-        DetourTransactionBegin();
+        BeginSlTransaction();
         DetourUpdateThread(GetCurrentThread());
 
         DetourAttach(&(PVOID&) o_dlssg_slGetPluginFunction, hkdlssg_slGetPluginFunction);
@@ -2204,7 +2226,7 @@ void StreamlineHooks::unhookLocalDlssg()
 {
     LOG_FUNC();
 
-    DetourTransactionBegin();
+    BeginSlTransaction();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_local_dlssg_slGetPluginFunction)
@@ -2235,7 +2257,7 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
     if (o_local_dlssg_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in local sl.dlssg");
-        DetourTransactionBegin();
+        BeginSlTransaction();
         DetourUpdateThread(GetCurrentThread());
 
         DetourAttach(&(PVOID&) o_local_dlssg_slGetPluginFunction, hklocal_dlssg_slGetPluginFunction);
@@ -2250,7 +2272,7 @@ void StreamlineHooks::unhookReflex()
 {
     LOG_FUNC();
 
-    DetourTransactionBegin();
+    BeginSlTransaction();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_reflex_slGetPluginFunction)
@@ -2286,7 +2308,7 @@ void StreamlineHooks::hookReflex(HMODULE slReflex)
     if (o_reflex_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.reflex");
-        DetourTransactionBegin();
+        BeginSlTransaction();
         DetourUpdateThread(GetCurrentThread());
 
         DetourAttach(&(PVOID&) o_reflex_slGetPluginFunction, hkreflex_slGetPluginFunction);
@@ -2306,7 +2328,7 @@ void StreamlineHooks::unhookPcl()
 {
     LOG_FUNC();
 
-    DetourTransactionBegin();
+    BeginSlTransaction();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_pcl_slGetPluginFunction)
@@ -2342,7 +2364,7 @@ void StreamlineHooks::hookPcl(HMODULE slPcl)
     if (o_pcl_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.pcl");
-        DetourTransactionBegin();
+        BeginSlTransaction();
         DetourUpdateThread(GetCurrentThread());
 
         DetourAttach(&(PVOID&) o_pcl_slGetPluginFunction, hkpcl_slGetPluginFunction);
@@ -2362,7 +2384,7 @@ void StreamlineHooks::unhookCommon()
 {
     LOG_FUNC();
 
-    DetourTransactionBegin();
+    BeginSlTransaction();
     DetourUpdateThread(GetCurrentThread());
 
     if (o_common_slGetPluginFunction)
@@ -2400,7 +2422,7 @@ void StreamlineHooks::hookCommon(HMODULE slCommon)
     if (o_common_slGetPluginFunction != nullptr)
     {
         LOG_TRACE("Hooking slGetPluginFunction in sl.common");
-        DetourTransactionBegin();
+        BeginSlTransaction();
         DetourUpdateThread(GetCurrentThread());
 
         DetourAttach(&(PVOID&) o_common_slGetPluginFunction, hkcommon_slGetPluginFunction);
