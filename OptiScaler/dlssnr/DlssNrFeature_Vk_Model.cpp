@@ -60,7 +60,9 @@ void ModelVk::Impl::ReleaseModels()
     // GPU work is retired by callers before feature/map teardown.
     for (auto& model : state.models)
     {
-        if (model.feature && NVNGXProxy::VULKAN_ReleaseFeature())
+        if (model.feature && state.runtime)
+            state.runtime->Release(model.feature);
+        else if (model.feature && NVNGXProxy::VULKAN_ReleaseFeature())
             NVNGXProxy::VULKAN_ReleaseFeature()(model.feature);
         if (model.parameters && NVNGXProxy::VULKAN_DestroyParameters())
             NVNGXProxy::VULKAN_DestroyParameters()(model.parameters);
@@ -95,8 +97,26 @@ bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int pass
     parameters->Set("DLSSNR.UICorrection", 1u);
     SetModelTuning(parameters, Profiles::PassSettings(config, passIndex));
     parameters->Set("DLSSNR.ControlMask", static_cast<void*>(nullptr));
-    const auto result = NVNGXProxy::VULKAN_CreateFeature1()(
-        state.device, commandBuffer, static_cast<NVSDK_NGX_Feature>(18), parameters, &model.feature);
+    auto result = NVSDK_NGX_Result_Fail;
+    if (!state.runtime)
+    {
+        result = NVNGXProxy::VULKAN_CreateFeature1()(state.device, commandBuffer, static_cast<NVSDK_NGX_Feature>(18),
+                                                     parameters, &model.feature);
+        // Current drivers refuse feature 18 here (0xBAD0000B), exactly as on D3D12. Fall back to the
+        // runtime's own Vulkan exports, the route the D3D12 path already takes.
+        if (NVSDK_NGX_FAILED(result) && !model.feature)
+        {
+            LOG_INFO("DLSS-NR Vulkan: driver CreateFeature(18) returned 0x{:X}; trying the direct runtime",
+                     static_cast<unsigned int>(result));
+            state.runtime = VulkanCompatibilityRuntime::TryOpen(state.instance, state.physicalDevice, state.device);
+        }
+    }
+    if (state.runtime && !model.feature)
+    {
+        result = state.runtime->Create(commandBuffer, parameters, &model.feature);
+        LOG_INFO("DLSS-NR Vulkan: direct runtime CreateFeature(18), pass {}, result=0x{:X} handle={}", passIndex + 1,
+                 static_cast<unsigned int>(result), static_cast<void*>(model.feature));
+    }
     // Identical-profile layers still require distinct temporal histories. Reject aliasing rather
     // than silently sharing a driver handle, including an AlreadyExists response with a handle.
     if (model.feature)
@@ -145,6 +165,8 @@ NVSDK_NGX_Result ModelVk::Impl::EvaluateModel(VkCommandBuffer commandBuffer, uns
     parameters->Set("DLSSNR.MVecScaleY", mvY);
     SetModelTuning(parameters, Profiles::PassSettings(config, passIndex));
     parameters->Set("DLSSNR.ControlMask", static_cast<void*>(nullptr));
+    if (state.runtime)
+        return state.runtime->Evaluate(commandBuffer, model.feature, parameters);
     return NVNGXProxy::VULKAN_EvaluateFeature()(commandBuffer, model.feature, parameters, nullptr);
 }
 
@@ -172,6 +194,7 @@ void ModelVk::Impl::Shutdown()
         vkDeviceWaitIdle(state.device);
 
     ReleaseModels();
+    state.runtime.reset();
     state.activePasses = 0;
     if (state.creationReady != VK_NULL_HANDLE)
         vkDestroyEvent(state.device, state.creationReady, nullptr);

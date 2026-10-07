@@ -6,6 +6,7 @@
 #include <shaders/dlssnr/DlssNr_Guides.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include "PassProfiles.h"
+#include "DlssNr_CompatibilityRuntime.h"
 #include <nvsdk_ngx_vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <mutex>
@@ -32,6 +33,8 @@ struct VkState
 
     bool ngxInitialised = false;
     NgxPassVk models[DlssNr::MaxPassCount] {};
+    // Set when the driver refused feature 18 and the runtime's own Vulkan exports own the models.
+    std::shared_ptr<VulkanCompatibilityRuntime> runtime;
     ModelSettings builtSettings[DlssNr::MaxPassCount] {};
     unsigned int activePasses = 0;
     VkEvent creationReady = VK_NULL_HANDLE;

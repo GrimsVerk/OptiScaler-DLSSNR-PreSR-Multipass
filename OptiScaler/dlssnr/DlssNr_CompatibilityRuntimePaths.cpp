@@ -8,7 +8,7 @@
 
 namespace DlssNr
 {
-std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::TryOpen(ID3D12Device* device)
+std::vector<std::filesystem::path> CompatibilityRuntimeFolders()
 {
     std::vector<std::filesystem::path> paths;
     for (const auto& path : State::Instance().NVNGX_FeatureInfo_Paths)
@@ -17,16 +17,35 @@ std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::TryOpen(ID3D12Device
     paths.push_back(Util::DllPath().parent_path());
     if (Config::Instance()->MainDllPath.has_value())
         paths.emplace_back(Config::Instance()->MainDllPath.value());
+
+    std::vector<std::filesystem::path> unique;
     std::set<std::wstring> visited;
     for (const auto& path : paths)
-    {
-        if (!visited.insert(Util::ToLower(std::filesystem::absolute(path).lexically_normal().wstring())).second)
-            continue;
+        if (visited.insert(Util::ToLower(std::filesystem::absolute(path).lexically_normal().wstring())).second)
+            unique.push_back(path);
+    return unique;
+}
+
+std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::TryOpen(ID3D12Device* device)
+{
+    for (const auto& path : CompatibilityRuntimeFolders())
         if (auto runtime = Open(path / L"nvngx_dlssnr.dll", device, NVNGXProxy::D3D12_GetCapabilityParameters(),
                                 NVNGXProxy::D3D12_DestroyParameters(), State::Instance().NVNGX_ApplicationDataPath))
             return runtime;
-    }
     LOG_INFO("NR compatibility: no supported direct runtime available; preserving driver failure");
+    return {};
+}
+
+std::shared_ptr<VulkanCompatibilityRuntime> VulkanCompatibilityRuntime::TryOpen(VkInstance instance,
+                                                                             VkPhysicalDevice physicalDevice,
+                                                                             VkDevice device)
+{
+    for (const auto& path : CompatibilityRuntimeFolders())
+        if (auto runtime = Open(path / L"nvngx_dlssnr.dll", instance, physicalDevice, device,
+                                NVNGXProxy::VULKAN_GetCapabilityParameters(), NVNGXProxy::VULKAN_DestroyParameters(),
+                                State::Instance().NVNGX_ApplicationDataPath))
+            return runtime;
+    LOG_INFO("NR compatibility: no Vulkan direct runtime available; preserving driver failure");
     return {};
 }
 } // namespace DlssNr

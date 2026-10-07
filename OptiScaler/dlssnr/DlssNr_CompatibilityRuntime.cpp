@@ -136,6 +136,27 @@ struct CompatibilityRuntime::Module
     using Shutdown = NVSDK_NGX_Result (*)(ID3D12Device*);
     Shutdown shutdown = nullptr;
 
+    // Vulkan exports. Same snippet ABI shape as D3D12: the trailing FeatureCommonInfo of the public
+    // Init_Ext/Init_Ext2 is the driver capability block instead.
+    using InitVk2 = NVSDK_NGX_Result (*)(unsigned long long, const wchar_t*, VkInstance, VkPhysicalDevice, VkDevice,
+                                         PFN_vkGetInstanceProcAddr, PFN_vkGetDeviceProcAddr, unsigned int,
+                                         NVSDK_NGX_Parameter*);
+    using InitVk = NVSDK_NGX_Result (*)(unsigned long long, const wchar_t*, VkInstance, VkPhysicalDevice, VkDevice,
+                                        unsigned int, NVSDK_NGX_Parameter*);
+    using CreateVk = NVSDK_NGX_Result (*)(VkDevice, VkCommandBuffer, NVSDK_NGX_Feature, NVSDK_NGX_Parameter*,
+                                          NVSDK_NGX_Handle**);
+    using EvaluateVk = NVSDK_NGX_Result (*)(VkCommandBuffer, const NVSDK_NGX_Handle*, const NVSDK_NGX_Parameter*,
+                                            void*);
+    using ReleaseVk = NVSDK_NGX_Result (*)(NVSDK_NGX_Handle*);
+    using ShutdownVk = NVSDK_NGX_Result (*)(VkDevice);
+    InitVk2 initVk2 = nullptr;
+    InitVk initVk = nullptr;
+    CreateVk createVk = nullptr;
+    EvaluateVk evaluateVk = nullptr;
+    ReleaseVk releaseVk = nullptr;
+    ShutdownVk shutdownVk = nullptr;
+    std::set<VkDevice> initializedVkDevices;
+
     ~Module()
     {
         std::lock_guard registryLock(registryMutex);
@@ -154,15 +175,15 @@ struct CompatibilityRuntime::Module
     }
 };
 
-std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::Open(const std::filesystem::path& candidate,
-                                                                 ID3D12Device* device, Allocate allocate,
-                                                                 Destroy destroy, const std::filesystem::path& dataPath)
+namespace
 {
-    if (!device || !allocate || !destroy)
-        return {};
-    // Cache only live owners. Last-owner shutdown/unload occurs after GPU retirement.
-    static std::weak_ptr<Module> liveModule;
-    static std::map<ID3D12Device*, std::weak_ptr<CompatibilityRuntime>> devices;
+// Cache only live owners. Last-owner shutdown/unload occurs after GPU retirement.
+std::weak_ptr<CompatibilityRuntime::Module> liveModule;
+} // namespace
+
+std::shared_ptr<CompatibilityRuntime::Module> CompatibilityRuntime::AcquireModule(
+    const std::filesystem::path& candidate)
+{
     std::unique_lock lock(registryMutex);
     try
     {
@@ -175,17 +196,8 @@ std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::Open(const std::file
                                    loaded = liveModule.lock();
                                    return loaded || !moduleRegistered;
                                });
-        if (loaded && !std::filesystem::equivalent(loaded->path, path))
-            return {};
-        for (auto it = devices.begin(); it != devices.end();)
-            if (it->second.expired())
-                it = devices.erase(it);
-            else
-                ++it;
-        if (auto it = devices.find(device); it != devices.end())
-            if (auto existing = it->second.lock())
-                return existing;
-        if (!loaded)
+        if (loaded)
+            return std::filesystem::equivalent(loaded->path, path) ? loaded : nullptr;
         {
             loaded = std::make_shared<Module>();
             loaded->path = path;
@@ -207,6 +219,12 @@ std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::Open(const std::file
             loaded->evaluate = reinterpret_cast<decltype(loaded->evaluate)>(symbol("NVSDK_NGX_D3D12_EvaluateFeature"));
             loaded->release = reinterpret_cast<decltype(loaded->release)>(symbol("NVSDK_NGX_D3D12_ReleaseFeature"));
             loaded->shutdown = reinterpret_cast<Module::Shutdown>(symbol("NVSDK_NGX_D3D12_Shutdown1"));
+            loaded->initVk2 = reinterpret_cast<Module::InitVk2>(symbol("NVSDK_NGX_VULKAN_Init_Ext2"));
+            loaded->initVk = reinterpret_cast<Module::InitVk>(symbol("NVSDK_NGX_VULKAN_Init_Ext"));
+            loaded->createVk = reinterpret_cast<Module::CreateVk>(symbol("NVSDK_NGX_VULKAN_CreateFeature1"));
+            loaded->evaluateVk = reinterpret_cast<Module::EvaluateVk>(symbol("NVSDK_NGX_VULKAN_EvaluateFeature"));
+            loaded->releaseVk = reinterpret_cast<Module::ReleaseVk>(symbol("NVSDK_NGX_VULKAN_ReleaseFeature"));
+            loaded->shutdownVk = reinterpret_cast<Module::ShutdownVk>(symbol("NVSDK_NGX_VULKAN_Shutdown1"));
             if (!loaded->init || !loaded->create || !loaded->evaluate || !loaded->release || !loaded->shutdown)
             {
                 LOG_ERROR("NR compatibility: {} is missing required NR exports", path.string());
@@ -257,6 +275,36 @@ std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::Open(const std::file
             LOG_INFO("NR compatibility: {} {} with {} named caller-path imports, no helper DLL",
                      loaded->borrowed ? "retained existing runtime" : "loaded", path.string(), slots.size());
         }
+        return loaded;
+    }
+    catch (const std::exception& error)
+    {
+        LOG_ERROR("NR compatibility: {}", error.what());
+        return {};
+    }
+}
+
+std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::Open(const std::filesystem::path& candidate,
+                                                                 ID3D12Device* device, Allocate allocate,
+                                                                 Destroy destroy, const std::filesystem::path& dataPath)
+{
+    if (!device || !allocate || !destroy)
+        return {};
+    static std::map<ID3D12Device*, std::weak_ptr<CompatibilityRuntime>> devices;
+    auto loaded = AcquireModule(candidate);
+    if (!loaded)
+        return {};
+    std::unique_lock lock(registryMutex);
+    try
+    {
+        for (auto it = devices.begin(); it != devices.end();)
+            if (it->second.expired())
+                it = devices.erase(it);
+            else
+                ++it;
+        if (auto it = devices.find(device); it != devices.end())
+            if (auto existing = it->second.lock())
+                return existing;
 
         auto owner = std::shared_ptr<CompatibilityRuntime>(new CompatibilityRuntime());
         owner->module = loaded;
@@ -328,5 +376,113 @@ NVSDK_NGX_Result CompatibilityRuntime::Release(NVSDK_NGX_Handle* feature)
     std::lock_guard lock(module->mutex);
     CallerScope caller;
     return module->release(feature);
+}
+
+std::shared_ptr<VulkanCompatibilityRuntime>
+VulkanCompatibilityRuntime::Open(const std::filesystem::path& candidate, VkInstance instance,
+                                 VkPhysicalDevice physicalDevice, VkDevice device, Allocate allocate, Destroy destroy,
+                                 const std::filesystem::path& dataPath)
+{
+    if (device == VK_NULL_HANDLE || instance == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE || !allocate ||
+        !destroy)
+        return {};
+    static std::map<VkDevice, std::weak_ptr<VulkanCompatibilityRuntime>> devices;
+    auto loaded = CompatibilityRuntime::AcquireModule(candidate);
+    if (!loaded)
+        return {};
+    if ((!loaded->initVk2 && !loaded->initVk) || !loaded->createVk || !loaded->evaluateVk || !loaded->releaseVk ||
+        !loaded->shutdownVk)
+    {
+        LOG_ERROR("NR compatibility: {} has no Vulkan NR exports", loaded->path.string());
+        return {};
+    }
+    std::unique_lock lock(registryMutex);
+    try
+    {
+        for (auto it = devices.begin(); it != devices.end();)
+            if (it->second.expired())
+                it = devices.erase(it);
+            else
+                ++it;
+        if (auto it = devices.find(device); it != devices.end())
+            if (auto existing = it->second.lock())
+                return existing;
+
+        auto owner = std::shared_ptr<VulkanCompatibilityRuntime>(new VulkanCompatibilityRuntime());
+        owner->module = loaded;
+        owner->device = device;
+        owner->destroyParameters = destroy;
+        std::unique_lock runtimeLock(loaded->mutex);
+        loaded->deviceRetired.wait(runtimeLock, [&] { return !loaded->initializedVkDevices.contains(device); });
+        auto result = allocate(&owner->capabilities);
+        if (result != NVSDK_NGX_Result_Success || !owner->capabilities)
+            return {};
+        CallerScope caller;
+        const auto writablePath = dataPath.empty() ? std::filesystem::temp_directory_path() : dataPath;
+        if (loaded->initVk2)
+        {
+            result = loaded->initVk2(0x24480451ull, writablePath.c_str(), instance, physicalDevice, device,
+                                     vkGetInstanceProcAddr, vkGetDeviceProcAddr, 0x15, owner->capabilities);
+            LOG_INFO("NR compatibility: Vulkan Init_Ext2 result=0x{:08X}", (unsigned) result);
+        }
+        if (result != NVSDK_NGX_Result_Success && loaded->initVk)
+        {
+            result = loaded->initVk(0x24480451ull, writablePath.c_str(), instance, physicalDevice, device, 0x15,
+                                    owner->capabilities);
+            LOG_INFO("NR compatibility: Vulkan Init_Ext result=0x{:08X}", (unsigned) result);
+        }
+        if (result != NVSDK_NGX_Result_Success)
+            return {};
+        owner->initialized = true;
+        loaded->initializedVkDevices.insert(device);
+        devices[device] = owner;
+        return owner;
+    }
+    catch (const std::exception& error)
+    {
+        LOG_ERROR("NR compatibility: {}", error.what());
+        return {};
+    }
+}
+
+VulkanCompatibilityRuntime::~VulkanCompatibilityRuntime()
+{
+    std::lock_guard lock(module->mutex);
+    CallerScope caller;
+    if (initialized)
+    {
+        if (!module->borrowed)
+        {
+            const auto result = module->shutdownVk(device);
+            LOG_INFO("NR compatibility: Vulkan Shutdown1 result=0x{:08X}", (unsigned) result);
+        }
+        module->initializedVkDevices.erase(device);
+        module->deviceRetired.notify_all();
+    }
+    if (capabilities)
+        destroyParameters(capabilities);
+}
+
+NVSDK_NGX_Result VulkanCompatibilityRuntime::Create(VkCommandBuffer commands, NVSDK_NGX_Parameter* params,
+                                                    NVSDK_NGX_Handle** feature)
+{
+    std::lock_guard lock(module->mutex);
+    CallerScope caller;
+    return module->createVk(device, commands, (NVSDK_NGX_Feature) 18, params, feature);
+}
+
+NVSDK_NGX_Result VulkanCompatibilityRuntime::Evaluate(VkCommandBuffer commands, const NVSDK_NGX_Handle* feature,
+                                                      NVSDK_NGX_Parameter* params)
+{
+    std::lock_guard lock(module->mutex);
+    CallerScope caller;
+    return module->evaluateVk(commands, feature, params, nullptr);
+}
+
+NVSDK_NGX_Result VulkanCompatibilityRuntime::Release(NVSDK_NGX_Handle* feature)
+{
+    std::lock_guard lock(module->mutex);
+    CallerScope caller;
+    return module->releaseVk(feature);
 }
 } // namespace DlssNr
