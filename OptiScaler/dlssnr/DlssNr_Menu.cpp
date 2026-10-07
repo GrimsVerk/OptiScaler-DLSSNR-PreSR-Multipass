@@ -166,7 +166,8 @@ void RenderMenu(Config* config, float menuResScale)
         bool generateBefore = placement.beforeUpscale;
         // Denoise first only takes over the placement where it actually runs (native D3D12).
         const bool denoiseFirstOn =
-            config->DlssNrDenoiseFirst.value_or_default() && (!feature || feature->Api() == API::DX12);
+            config->DlssNrDenoiseFirst.value_or_default() &&
+            (!feature || feature->Api() == API::DX12 || (feature->Api() == API::Vulkan && !feature->IsWithDx12()));
         ImGui::SameLine(toggleRight);
         ImGui::BeginDisabled(placement.deferred || denoiseFirstOn);
         if (PipelineUi::CheckboxWrapped("Generate model before upscale", &generateBefore, toggleWidth))
@@ -211,9 +212,10 @@ void RenderMenu(Config* config, float menuResScale)
         placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
                                      config->DlssNrDeferredDlss.value_or_default(),
                                      config->DlssNrResidualAcrossRr.value_or_default(), finished);
-        // Denoise first exists only in the D3D12 pipeline. On Vulkan or DX11 the toggle would be read by nothing,
-        // so say so instead of letting it look switched on.
-        const bool denoiseUnsupportedApi = feature && feature->Api() != API::DX12;
+        // Denoise first runs in the D3D12 pipeline and natively on Vulkan (edit-onto-raw step only). On a native
+        // DX11 upscaler the toggle would be read by nothing, so say so instead of letting it look switched on.
+        const bool denoiseVulkan = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
+        const bool denoiseUnsupportedApi = feature && feature->Api() != API::DX12 && !denoiseVulkan;
         const bool denoiseBlocked = placement.deferred || finished || denoiseUnsupportedApi;
         bool denoiseFirst = config->DlssNrDenoiseFirst.value_or_default();
         ImGui::BeginDisabled(denoiseBlocked);
@@ -221,26 +223,32 @@ void RenderMenu(Config* config, float menuResScale)
             config->DlssNrDenoiseFirst = denoiseFirst;
         ImGui::EndDisabled();
         if (denoiseUnsupportedApi && denoiseFirst)
-            ImGui::TextWrapped("Denoise first is DirectX 12 only for now; NR runs %s the upscaler in this game.",
+            ImGui::TextWrapped("Denoise first needs DirectX 12 or Vulkan; NR runs %s the upscaler in this game.",
                                config->DlssNrRunBeforeSr.value_or_default() ? "before" : "after");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
-                denoiseUnsupportedApi ? "Only implemented for native DirectX 12 games so far (this game is Vulkan or "
-                                        "DirectX 11)."
+                denoiseUnsupportedApi ? "Only implemented for DirectX 12 and native Vulkan games so far."
                 : denoiseBlocked
                     ? "Turn off the separate-edit and finished-picture options first."
                     : "Runs the game's own upscaler once more at the render resolution (Ray Reconstruction if the game "
                       "uses it, otherwise DLSS) so NR is shown a clean, denoised, steady image instead of the noisy "
                       "jittered one.\nNR edits that image; the second step below decides how the edit reaches the "
-                      "screen.\nNative DirectX 12 only. Costs one extra upscaler pass per frame.");
+                      "screen.\nDirectX 12 and native Vulkan (Vulkan: edit onto the raw render only). Costs one extra "
+                      "upscaler pass per frame.");
         if (denoiseFirst && !denoiseBlocked)
         {
             ScopedIndent denoiseIndent {};
+            if (denoiseVulkan)
+                ImGui::TextWrapped("Vulkan: the second step is always \"Edit onto the raw render\".");
             int step = std::clamp(config->DlssNrDenoiseFirstStep.value_or_default(), 0, 2);
+            ImGui::BeginDisabled(denoiseVulkan);
             if (ImGui::Combo("Second step", &step,
                              "Game upscaler again, jitter zeroed\0Private DLSS SR, jitter zeroed\0Edit onto the raw "
                              "render, then the game upscaler\0"))
                 config->DlssNrDenoiseFirstStep = step;
+            ImGui::EndDisabled();
+            if (denoiseVulkan)
+                step = 2; // the Vulkan pass only implements this step; show its options
             HelpMarker(
                 "Game upscaler again: the game's upscaler receives the NR'd clean image. Simple, but the second pass "
                 "gets no real sub-pixel samples, so it can look softer than native.\n\n"

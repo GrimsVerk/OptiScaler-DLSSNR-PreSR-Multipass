@@ -6,6 +6,7 @@
 #include "precompile/DlssNr_Shader_Vk.h"
 #include "precompile/dlssnr_finished_color_Shader_Vk.h"
 #include "precompile/dlssnr_spatial_Shader_Vk.h"
+#include "precompile/dlssnr_denoise_first_Shader_Vk.h"
 #include "precompile/dlssnr_spatial_guides_Shader_Vk.h"
 #include <dlssnr/DlssNrFinished_Vk.h>
 
@@ -109,6 +110,10 @@ DlssNr_Vk::DlssNr_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InP
     if (!CreateComputePipeline(_device, _pipelineLayout, &_spatialPipeline, spatialCode) ||
         !CreateComputePipeline(_device, _pipelineLayout, &_spatialGuidesPipeline, spatialGuidesCode))
         LOG_WARN("DLSS-NR Vulkan: spatial compression shaders unavailable; ordinary NR remains available");
+    std::vector<char> denoiseFirstCode(dlssnr_denoise_first_spv,
+                                       dlssnr_denoise_first_spv + sizeof(dlssnr_denoise_first_spv));
+    if (!CreateComputePipeline(_device, _pipelineLayout, &_denoiseFirstPipeline, denoiseFirstCode))
+        LOG_WARN("DLSS-NR Vulkan: denoise-first edit shader unavailable");
     _init = true;
     LOG_INFO("DLSS-NR Vulkan pass up: {} constant slots, stride {}", kSlots, (uint64_t) _slotStride);
 }
@@ -129,6 +134,8 @@ DlssNr_Vk::~DlssNr_Vk()
         vkDestroyPipeline(_device, _spatialPipeline, nullptr);
     if (_spatialGuidesPipeline)
         vkDestroyPipeline(_device, _spatialGuidesPipeline, nullptr);
+    if (_denoiseFirstPipeline)
+        vkDestroyPipeline(_device, _denoiseFirstPipeline, nullptr);
     _dummy.Destroy(_device);
 }
 
@@ -201,7 +208,8 @@ void DlssNr_Vk::WriteDescriptors(VkDescriptorSet set, VkDeviceSize constantOffse
 bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, uint32_t InThreadsX,
                          uint32_t InThreadsY, VkImageView InSource, VkImageView InModel, VkImageView InOriginal,
                          VkImageView InMotion, VkImageView InTarget, VkImageView InKeep, VkImageLayout InSourceLayout,
-                         VkImageLayout InMotionLayout, bool finishedColor, uint32_t* immutableSlot)
+                         VkImageLayout InMotionLayout, bool finishedColor, uint32_t* immutableSlot,
+                         VkPipeline pipelineOverride)
 {
     if (!CanRender() || InCmdList == VK_NULL_HANDLE || (finishedColor && !_finishedPipeline))
         return false;
@@ -229,7 +237,8 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
             *immutableSlot = slot;
     }
 
-    vkCmdBindPipeline(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE, finishedColor ? _finishedPipeline : _pipeline);
+    vkCmdBindPipeline(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      pipelineOverride ? pipelineOverride : finishedColor ? _finishedPipeline : _pipeline);
     vkCmdBindDescriptorSets(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE, _pipelineLayout, 0, 1, &_descriptorSets[slot], 0,
                             nullptr);
 

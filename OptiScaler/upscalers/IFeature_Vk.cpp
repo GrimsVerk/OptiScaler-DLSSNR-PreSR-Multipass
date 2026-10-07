@@ -116,7 +116,11 @@ bool IFeature_Vk::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InP
     const bool useNr = !finishedNr && NeuralRendering && NeuralRendering->CanRender() && !IsWithDx12() &&
                        Config::Instance()->DlssNrEnabled.value_or_default() &&
                        DlssNr::HasSupportedSubrects(InParameters, false);
-    const bool nrBeforeUpscale = useNr && Config::Instance()->DlssNrRunBeforeSr.value_or_default() &&
+    // Denoise first takes over the placement when it is on: NR runs on a private 1:1 reconstruction and
+    // its edit reaches the game's upscale through the raw colour input.
+    const bool denoiseFirst = useNr && Config::Instance()->DlssNrDenoiseFirst.value_or_default() &&
+                              DlssNr::HasSupportedSubrects(InParameters, true);
+    const bool nrBeforeUpscale = useNr && !denoiseFirst && Config::Instance()->DlssNrRunBeforeSr.value_or_default() &&
                                  DlssNr::HasSupportedSubrects(InParameters, true);
     const auto nrDepth = DlssNr::ImageInfo(paramDepth);
     const auto nrMotion = DlssNr::ImageInfo(paramMotion);
@@ -129,7 +133,7 @@ bool IFeature_Vk::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InP
         NeuralRendering->CaptureFinished(InCmdBuffer, nrDepth, nrMotion, nrFrame, Instance);
     // Keep the current per-evaluate subrect. The feature's cached render size may be last frame's.
 
-    if (useNr && !nrBeforeUpscale)
+    if (useNr && !nrBeforeUpscale && !denoiseFirst)
         pipeline.push_back(DlssNr::MakePass(*NeuralRendering, InCmdBuffer, Instance, nrDepth, nrMotion, nrFrame));
 
     if (useOutputScaling)
@@ -285,6 +289,35 @@ bool IFeature_Vk::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InP
     const auto currentTarget = SetupShaderPipeline(pipeline, originalOutput);
     if (paramOutput)
         scopedParameters.SetOutput(currentTarget);
+
+    if (denoiseFirst)
+    {
+        if (!DenoiseFirst)
+            DenoiseFirst = std::make_unique<DlssNr::DenoiseFirstVk>();
+        DlssNr::DenoiseFirstVkInput input {};
+        input.instance = Instance;
+        input.physicalDevice = PhysicalDevice;
+        input.device = Device;
+        input.parameters = InParameters;
+        input.frame = DlssNr::FrameInfo(InParameters, true);
+        input.frame.DepthInverted = DepthInverted();
+        input.frame.ColourIsLinearHdr = IsHdr();
+        input.frame.RayReconstruction = upscaler == Upscaler::DLSSD;
+        input.frame.MotionVectorsLowResolution = LowResMV();
+        input.depth = nrDepth;
+        input.motion = nrMotion;
+        input.rayReconstruction = upscaler == Upscaler::DLSSD;
+        input.depthInverted = DepthInverted();
+        input.jitteredMotion = JitteredMV();
+        input.lowResolutionMotion = LowResMV();
+        input.hdr = IsHdr();
+        input.autoExposure = AutoExposure();
+        const auto composite = DenoiseFirst->Before(*NeuralRendering, InCmdBuffer, input);
+        if (composite.Image)
+            scopedParameters.SetColour(*NeuralRendering, InCmdBuffer, composite);
+    }
+    else if (DenoiseFirst)
+        DenoiseFirst.reset();
 
     if (nrBeforeUpscale)
     {

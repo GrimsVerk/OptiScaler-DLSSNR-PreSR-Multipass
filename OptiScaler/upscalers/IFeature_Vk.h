@@ -6,6 +6,7 @@
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/magnifier/Magnifier_Vk.h>
 #include <shaders/dlssnr/DlssNr_Vk.h>
+#include <dlssnr/DlssNr_DenoiseFirst_Vk.h>
 
 class IFeature_Vk : public virtual IFeature
 {
@@ -17,6 +18,7 @@ class IFeature_Vk : public virtual IFeature
     PFN_vkGetDeviceProcAddr GDPA = nullptr;
 
     std::unique_ptr<DlssNr_Vk> NeuralRendering = nullptr;
+    std::unique_ptr<DlssNr::DenoiseFirstVk> DenoiseFirst = nullptr;
     std::unique_ptr<OS_Vk> OutputScaler = nullptr;
     std::unique_ptr<RCAS_Vk> RCAS = nullptr;
     std::unique_ptr<Magnifier_Vk> Magnifier = nullptr;

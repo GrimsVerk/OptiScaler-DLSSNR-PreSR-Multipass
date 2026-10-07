@@ -60,6 +60,7 @@ class DlssNr_Vk : public Shader_Vk
     VkPipeline _finishedPipeline = VK_NULL_HANDLE;
     VkPipeline _spatialPipeline = VK_NULL_HANDLE;
     VkPipeline _spatialGuidesPipeline = VK_NULL_HANDLE;
+    VkPipeline _denoiseFirstPipeline = VK_NULL_HANDLE;
     VkImageLayout _intermediateLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkDeviceSize _slotStride = 0; // sizeof(DlssNrConstants), rounded up to the device's alignment
@@ -118,5 +119,17 @@ class DlssNr_Vk : public Shader_Vk
                   VkImageLayout InSourceLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                   VkImageLayout InMotionLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, bool finishedColor = false,
                   // Initialize to UINT32_MAX; identical bindings/constants within one model chain only.
-                  uint32_t* immutableSlot = nullptr);
+                  uint32_t* immutableSlot = nullptr, VkPipeline pipelineOverride = VK_NULL_HANDLE);
+
+    // Denoise first, edit step: raw render (source) + NR's edit of the clean 1:1 image (model over
+    // original), resampled onto the raw jitter, written to target. Same bindings as the main pass.
+    bool DenoiseFirstReady() const { return _denoiseFirstPipeline != VK_NULL_HANDLE; }
+    bool DispatchDenoiseFirst(VkCommandBuffer cmd, const DlssNrConstants& constants, VkImageView source,
+                              VkImageLayout sourceLayout, VkImageView model, VkImageView original,
+                              VkImageView target)
+    {
+        return Dispatch(cmd, constants, constants.Width, constants.Height, source, model, original, VK_NULL_HANDLE,
+                        target, VK_NULL_HANDLE, sourceLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false,
+                        nullptr, _denoiseFirstPipeline);
+    }
 };

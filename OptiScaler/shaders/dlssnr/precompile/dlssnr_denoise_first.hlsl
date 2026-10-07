@@ -15,7 +15,12 @@
 //   gPassthrough           1 = ratio mode does not multiply fireflies (samples far above the clean value)
 //   gTransferStrength      edit strength, 1 = as the model produced it
 //   gMaxRatio              ceiling for the ratio mode
+#ifdef VK_MODE
+[[vk::binding(0, 0)]]
+cbuffer Params : register(b0, space0)
+#else
 cbuffer Params : register(b0)
+#endif
 {
     uint  gMode;
     float gWhitePoint;
@@ -53,13 +58,36 @@ cbuffer Params : register(b0)
     float gReplaceDetailUnused, gModelWorkScaleUnused, gResidualConfidenceSensitivity;
 };
 
+#ifdef VK_MODE
+[[vk::binding(1, 0)]]
+#endif
 Texture2D<float4>   gSource   : register(t0); // the raw, jittered, noisy render (active region, origin zero)
+#ifdef VK_MODE
+[[vk::binding(2, 0)]]
+#endif
 Texture2D<float4>   gModel    : register(t1); // NR's output on the clean 1:1 image
+#ifdef VK_MODE
+[[vk::binding(3, 0)]]
+#endif
 Texture2D<float4>   gOriginal : register(t2); // the clean 1:1 image NR was shown
+#ifdef VK_MODE
+[[vk::binding(4, 0)]]
+#endif
 Texture2D<float4>   gMotion   : register(t3); // unused; bound for descriptor-table parity
+#ifndef VK_MODE
 Texture2D<float4>   gExposure : register(t4); // unused; bound for descriptor-table parity
+#endif
+#ifdef VK_MODE
+[[vk::binding(5, 0)]]
+#endif
 RWTexture2D<float4> gTarget   : register(u0); // raw render carrying the edit, handed to the game's upscale
+#ifdef VK_MODE
+[[vk::binding(6, 0)]]
+#endif
 RWTexture2D<float4> gKeep     : register(u1); // unused; bound for descriptor-table parity
+#ifdef VK_MODE
+[[vk::binding(7, 0)]]
+#endif
 SamplerState        gLinear   : register(s0); // unused; the kernels gather their own taps
 
 static const float kRatioFloor = 1e-3; // scene-linear; keeps the ratio finite on black pixels
