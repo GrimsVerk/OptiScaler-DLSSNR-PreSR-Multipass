@@ -164,7 +164,9 @@ void RenderMenu(Config* config, float menuResScale)
                                           config->DlssNrDeferredDlss.value_or_default(),
                                           config->DlssNrResidualAcrossRr.value_or_default(), finished);
         bool generateBefore = placement.beforeUpscale;
-        const bool denoiseFirstOn = config->DlssNrDenoiseFirst.value_or_default();
+        // Denoise first only takes over the placement where it actually runs (native D3D12).
+        const bool denoiseFirstOn =
+            config->DlssNrDenoiseFirst.value_or_default() && (!feature || feature->Api() == API::DX12);
         ImGui::SameLine(toggleRight);
         ImGui::BeginDisabled(placement.deferred || denoiseFirstOn);
         if (PipelineUi::CheckboxWrapped("Generate model before upscale", &generateBefore, toggleWidth))
@@ -209,15 +211,23 @@ void RenderMenu(Config* config, float menuResScale)
         placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
                                      config->DlssNrDeferredDlss.value_or_default(),
                                      config->DlssNrResidualAcrossRr.value_or_default(), finished);
-        const bool denoiseBlocked = placement.deferred || finished;
+        // Denoise first exists only in the D3D12 pipeline. On Vulkan or DX11 the toggle would be read by nothing,
+        // so say so instead of letting it look switched on.
+        const bool denoiseUnsupportedApi = feature && feature->Api() != API::DX12;
+        const bool denoiseBlocked = placement.deferred || finished || denoiseUnsupportedApi;
         bool denoiseFirst = config->DlssNrDenoiseFirst.value_or_default();
         ImGui::BeginDisabled(denoiseBlocked);
         if (PipelineUi::CheckboxWrapped("Denoise at native, then NR, then upscale", &denoiseFirst, toggleWidth))
             config->DlssNrDenoiseFirst = denoiseFirst;
         ImGui::EndDisabled();
+        if (denoiseUnsupportedApi && denoiseFirst)
+            ImGui::TextWrapped("Denoise first is DirectX 12 only for now; NR runs %s the upscaler in this game.",
+                               config->DlssNrRunBeforeSr.value_or_default() ? "before" : "after");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
-                denoiseBlocked
+                denoiseUnsupportedApi ? "Only implemented for native DirectX 12 games so far (this game is Vulkan or "
+                                        "DirectX 11)."
+                : denoiseBlocked
                     ? "Turn off the separate-edit and finished-picture options first."
                     : "Runs the game's own upscaler once more at the render resolution (Ray Reconstruction if the game "
                       "uses it, otherwise DLSS) so NR is shown a clean, denoised, steady image instead of the noisy "
