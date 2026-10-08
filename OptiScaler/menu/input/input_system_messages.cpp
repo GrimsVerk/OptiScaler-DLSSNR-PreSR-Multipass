@@ -592,12 +592,7 @@ bool HandleWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, Inpu
 
     case WM_CHAR:
     {
-        if (!_state.CharMessageSeen)
-        {
-            _state.CharMessageSeen = true;
-            _state.PendingPolledText.clear();
-            LOG_INFO("character messages seen; menu text comes from WM_CHAR");
-        }
+        _state.CharMessageSincePoll = true;
         if (wParam >= 0x20 && wParam <= 0xFFFF)
             _state.TextInput.push_back(static_cast<wchar_t>(wParam));
 
@@ -607,12 +602,7 @@ bool HandleWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, Inpu
 
     case WM_UNICHAR:
     {
-        if (!_state.CharMessageSeen)
-        {
-            _state.CharMessageSeen = true;
-            _state.PendingPolledText.clear();
-            LOG_INFO("character messages seen; menu text comes from WM_CHAR");
-        }
+        _state.CharMessageSincePoll = true;
         if (wParam != UNICODE_NOCHAR && wParam >= 0x20 && wParam <= 0xFFFF)
             _state.TextInput.push_back(static_cast<wchar_t>(wParam));
 

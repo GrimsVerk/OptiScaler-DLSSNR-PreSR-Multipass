@@ -420,19 +420,31 @@ void PollVirtualKeyLocked(int vk, DWORD time)
         SetKeyUpStateOnly(vk, time);
 }
 
-// Text for ImGui input fields normally comes from WM_CHAR. A game that never lets keyboard messages
-// reach its window (Death Stranding) leaves the fields empty, so translate polled presses instead.
+// Text for ImGui input fields normally comes from WM_CHAR. A game whose keyboard messages stop while the
+// menu is open (Death Stranding) leaves the fields empty, so translate polled presses as well.
 void PollTextInputLocked()
 {
-    if (_state.CharMessageSeen || !_state.MenuVisible)
+    const bool charMessages = _state.CharMessageSincePoll;
+    _state.CharMessageSincePoll = false;
+
+    if (!_state.MenuVisible)
     {
         _state.PolledTextKeyDown.fill(false);
         _state.PendingPolledText.clear();
         return;
     }
 
-    // Last frame's presses had a full message pump to produce WM_CHAR; none came, so they are text.
-    _state.TextInput += _state.PendingPolledText;
+    // Last frame's presses had a full message pump to produce WM_CHAR. If none came, they are text.
+    if (!charMessages && !_state.PendingPolledText.empty())
+    {
+        _state.TextInput += _state.PendingPolledText;
+
+        if (!_state.PolledTextLogged)
+        {
+            _state.PolledTextLogged = true;
+            LOG_INFO("no WM_CHAR for a key press; menu text comes from polled keys");
+        }
+    }
     _state.PendingPolledText.clear();
 
     BYTE keyboard[256] {};
@@ -471,11 +483,6 @@ void PollTextInputLocked()
                 _state.PendingPolledText.push_back(chars[i]);
         }
 
-        if (count > 0 && !_state.PolledTextLogged)
-        {
-            _state.PolledTextLogged = true;
-            LOG_INFO("no character messages yet; menu text comes from polled keys (vk 0x{:02X})", vk);
-        }
     }
 }
 
