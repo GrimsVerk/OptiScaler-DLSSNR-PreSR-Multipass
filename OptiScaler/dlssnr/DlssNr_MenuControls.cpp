@@ -205,6 +205,13 @@ void RenderInput(Config* config)
     if (reversible == 2 || reversible == 4)
         Slider("Restore sharpness", config->DlssNrReplaceDetailStrength, 0.0f, 2.0f, "%.2f", 0.0f);
 
+    // A tone-mapped (SDR) input is already display-referred: the resolve skips the white point entirely.
+    const auto toneMapped = ReadStatus(Backend::Dx12).toneMappedInput.value_or(false);
+    if (toneMapped)
+        ImGui::TextWrapped("The game hands NR an already tone-mapped picture (DLSS without the HDR flag), so the "
+                           "white point, exposure trim and paper white below have no effect in this game.");
+    ImGui::BeginDisabled(toneMapped);
+
     const char* exposureNames[] = { "Manual", "Game exposure", "Automatic HDR exposure" };
     const auto source = config->DlssNrWhitePointSource.value_or_default();
     int selected = source == 3 ? 2 : source == 1 ? 1 : 0;
@@ -228,6 +235,7 @@ void RenderInput(Config* config)
     }
     Slider("Paper white", config->DlssNrWhitePointScale, 0.25f, 2000.0f, "%.2fx", {}, ImGuiSliderFlags_Logarithmic);
     HelpMarker("Higher values darken the NR input; lower values brighten it.");
+    ImGui::EndDisabled();
 }
 
 // Model tuning rebuilds the feature; commit slider changes only on release.

@@ -63,10 +63,12 @@ auto DlssNr_Dx12::State::Publish() -> void
                             std::to_string(nr.spatialLayout.ordinaryH) + " -> " +
                             std::to_string(nr.spatialLayout.modelW) + "x" + std::to_string(nr.spatialLayout.modelH);
     }
-    DlssNr::PublishStatus(&shader, DlssNr::Backend::Dx12,
-                          { !nr.failed && modelRunning && enlargementStatus.empty(),
-                            nr.failed ? nr.reason : enlargementStatus, lastGpuTime, frames, spatialStatus,
-                            nr.spatialActive });
+    DlssNr::StatusSnapshot status { !nr.failed && modelRunning && enlargementStatus.empty(),
+                                    nr.failed ? nr.reason : enlargementStatus, lastGpuTime, frames, spatialStatus,
+                                    nr.spatialActive };
+    if (loggedCompose.valid)
+        status.toneMappedInput = loggedCompose.passthrough != 0;
+    DlssNr::PublishStatus(&shader, DlssNr::Backend::Dx12, status);
 }
 
 void DlssNr_Dx12::State::EndGpuTiming(ID3D12GraphicsCommandList* cmdList)

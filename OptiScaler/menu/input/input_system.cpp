@@ -420,6 +420,54 @@ void PollVirtualKeyLocked(int vk, DWORD time)
         SetKeyUpStateOnly(vk, time);
 }
 
+// Text for ImGui input fields normally comes from WM_CHAR. A game that never lets keyboard messages
+// reach its window (Death Stranding) leaves the fields empty, so translate polled presses instead.
+void PollTextInputLocked()
+{
+    if (_state.KeyboardMessageSeen || !_state.MenuVisible)
+    {
+        _state.PolledTextKeyDown.fill(false);
+        return;
+    }
+
+    BYTE keyboard[256] {};
+    for (int vk : { VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU })
+    {
+        if (RealGetAsyncKeyStateSafe(vk) & 0x8000)
+            keyboard[vk] = 0x80;
+    }
+
+    if (RealGetKeyStateSafe(VK_CAPITAL) & 0x0001)
+        keyboard[VK_CAPITAL] = 0x01;
+
+    // Ctrl without AltGr is a shortcut, not text.
+    const bool shortcut = (keyboard[VK_CONTROL] & 0x80) && !(keyboard[VK_MENU] & 0x80);
+
+    const HWND hwnd = _state.InputHwnd != nullptr ? _state.InputHwnd : _state.TargetHwnd;
+    const HKL layout = GetKeyboardLayout(hwnd != nullptr ? GetWindowThreadProcessId(hwnd, nullptr) : 0);
+
+    for (int vk = 0x08; vk < 256; ++vk)
+    {
+        const bool down = ShouldPollVirtualKey(vk) && (RealGetAsyncKeyStateSafe(vk) & 0x8000) != 0;
+        const bool pressed = down && !_state.PolledTextKeyDown[vk];
+        _state.PolledTextKeyDown[vk] = down;
+
+        if (!pressed || shortcut)
+            continue;
+
+        wchar_t chars[4] {};
+        // Flag 0x4 leaves the thread's dead-key state alone, so the game's own text input is unaffected.
+        const int count = ToUnicodeEx(static_cast<UINT>(vk), MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, layout), keyboard,
+                                      chars, 4, 0x4, layout);
+
+        for (int i = 0; i < count; ++i)
+        {
+            if (chars[i] >= 0x20)
+                _state.TextInput.push_back(chars[i]);
+        }
+    }
+}
+
 bool PollMouseButtonLocked(int vk, int button, DWORD time)
 {
     if (button < 0 || button >= static_cast<int>(_state.MouseButtons.size()))
@@ -739,6 +787,8 @@ void PollInputFallbackLocked()
         if (_state.Keys[vk].Down != wasDown || _state.Keys[vk].Pressed || _state.Keys[vk].Released)
             _state.PolledKeyboardUsedThisFrame = true;
     }
+
+    PollTextInputLocked();
 
     if (_state.PolledKeyboardUsedThisFrame)
         _state.PolledKeyboardFrameCount++;

@@ -366,6 +366,11 @@ struct InputState
 
     std::wstring TextInput;
 
+    // Set once the game window delivers a keyboard message (WM_KEYDOWN/WM_CHAR). Until then the
+    // polling fallback turns polled key presses into text itself (Death Stranding sends none).
+    bool KeyboardMessageSeen = false;
+    std::array<bool, 256> PolledTextKeyDown {};
+
     std::recursive_mutex Mutex;
 };
 

@@ -23,6 +23,8 @@ struct StatusSnapshot
     unsigned long long frames = 0;
     std::string spatialStatus;
     bool spatialActive = false;
+    // Set once the DX12 resolve has run: the game handed NR an already tone-mapped frame.
+    std::optional<bool> toneMappedInput;
 };
 
 struct ControlRequests
