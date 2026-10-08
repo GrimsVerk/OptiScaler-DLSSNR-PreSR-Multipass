@@ -208,8 +208,9 @@ void RenderInput(Config* config)
     // A tone-mapped (SDR) input is already display-referred: the resolve skips the white point entirely.
     const auto toneMapped = ReadStatus(Backend::Dx12).toneMappedInput.value_or(false);
     if (toneMapped)
-        ImGui::TextWrapped("The game hands NR an already tone-mapped picture (DLSS without the HDR flag), so the "
-                           "white point, exposure trim and paper white below have no effect in this game.");
+        ImGui::TextWrapped("The game's DLSS colour is display-range (no HDR flag, or a format that cannot hold "
+                           "HDR), so NR treats it as tone mapped. White point, exposure trim and paper white have "
+                           "no effect in this game.");
     ImGui::BeginDisabled(toneMapped);
 
     const char* exposureNames[] = { "Manual", "Game exposure", "Automatic HDR exposure" };
