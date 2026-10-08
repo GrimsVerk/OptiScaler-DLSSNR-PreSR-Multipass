@@ -403,26 +403,29 @@ bool ShouldPollVirtualKey(int vk)
     }
 }
 
-void PollVirtualKeyLocked(int vk, DWORD time)
+// Returns the polled physical state, so text input can reuse it without polling again.
+bool PollVirtualKeyLocked(int vk, DWORD time)
 {
     if (!ShouldPollVirtualKey(vk))
-        return;
+        return false;
 
     const bool down = (RealGetAsyncKeyStateSafe(vk) & 0x8000) != 0;
 
     if (down)
     {
         SetKeyDown(vk, time, ShouldBlockKeyboardInputLocked());
-        return;
+        return true;
     }
 
     if (_state.Keys[vk].Down)
         SetKeyUpStateOnly(vk, time);
+
+    return false;
 }
 
 // Text for ImGui input fields normally comes from WM_CHAR. A game whose keyboard messages stop while the
 // menu is open (Death Stranding) leaves the fields empty, so translate polled presses as well.
-void PollTextInputLocked()
+void PollTextInputLocked(const std::array<bool, 256>& polledDown)
 {
     const bool charMessages = _state.CharMessageSincePoll;
     _state.CharMessageSincePoll = false;
@@ -447,6 +450,19 @@ void PollTextInputLocked()
     }
     _state.PendingPolledText.clear();
 
+    // Only key-down edges are text; skip the keyboard-state and layout work on frames without one.
+    std::array<bool, 256> pressed {};
+    bool anyPressed = false;
+    for (int vk = 0x08; vk < 256; ++vk)
+    {
+        pressed[vk] = polledDown[vk] && !_state.PolledTextKeyDown[vk];
+        anyPressed |= pressed[vk];
+    }
+    _state.PolledTextKeyDown = polledDown;
+
+    if (!anyPressed)
+        return;
+
     BYTE keyboard[256] {};
     for (int vk : { VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU })
     {
@@ -458,18 +474,15 @@ void PollTextInputLocked()
         keyboard[VK_CAPITAL] = 0x01;
 
     // Ctrl without AltGr is a shortcut, not text.
-    const bool shortcut = (keyboard[VK_CONTROL] & 0x80) && !(keyboard[VK_MENU] & 0x80);
+    if ((keyboard[VK_CONTROL] & 0x80) && !(keyboard[VK_MENU] & 0x80))
+        return;
 
     const HWND hwnd = _state.InputHwnd != nullptr ? _state.InputHwnd : _state.TargetHwnd;
     const HKL layout = GetKeyboardLayout(hwnd != nullptr ? GetWindowThreadProcessId(hwnd, nullptr) : 0);
 
     for (int vk = 0x08; vk < 256; ++vk)
     {
-        const bool down = ShouldPollVirtualKey(vk) && (RealGetAsyncKeyStateSafe(vk) & 0x8000) != 0;
-        const bool pressed = down && !_state.PolledTextKeyDown[vk];
-        _state.PolledTextKeyDown[vk] = down;
-
-        if (!pressed || shortcut)
+        if (!pressed[vk])
             continue;
 
         wchar_t chars[4] {};
@@ -482,7 +495,6 @@ void PollTextInputLocked()
             if (chars[i] >= 0x20)
                 _state.PendingPolledText.push_back(chars[i]);
         }
-
     }
 }
 
@@ -797,16 +809,17 @@ void PollInputFallbackLocked()
     if (_state.PolledMouseUsedThisFrame)
         _state.PolledMouseFrameCount++;
 
+    std::array<bool, 256> polledDown {};
     for (int vk = 0; vk < 256; ++vk)
     {
         const bool wasDown = _state.Keys[vk].Down;
-        PollVirtualKeyLocked(vk, time);
+        polledDown[vk] = PollVirtualKeyLocked(vk, time);
 
         if (_state.Keys[vk].Down != wasDown || _state.Keys[vk].Pressed || _state.Keys[vk].Released)
             _state.PolledKeyboardUsedThisFrame = true;
     }
 
-    PollTextInputLocked();
+    PollTextInputLocked(polledDown);
 
     if (_state.PolledKeyboardUsedThisFrame)
         _state.PolledKeyboardFrameCount++;
