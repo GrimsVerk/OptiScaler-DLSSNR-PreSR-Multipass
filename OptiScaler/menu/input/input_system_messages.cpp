@@ -569,7 +569,6 @@ bool HandleWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, Inpu
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
     {
-        _state.KeyboardMessageSeen = true;
         const int vk = NormalizeModifierVirtualKey(static_cast<int>(wParam), lParam);
         SetKeyDown(vk, GetMessageTime(), blockKeyboard);
         OPTIINPUT_LOG_VERBOSE("key down vk:{} blocked:{}", vk, blockKeyboard ? 1 : 0);
@@ -593,7 +592,12 @@ bool HandleWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, Inpu
 
     case WM_CHAR:
     {
-        _state.KeyboardMessageSeen = true;
+        if (!_state.CharMessageSeen)
+        {
+            _state.CharMessageSeen = true;
+            _state.PendingPolledText.clear();
+            LOG_INFO("character messages seen; menu text comes from WM_CHAR");
+        }
         if (wParam >= 0x20 && wParam <= 0xFFFF)
             _state.TextInput.push_back(static_cast<wchar_t>(wParam));
 
@@ -603,7 +607,12 @@ bool HandleWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, Inpu
 
     case WM_UNICHAR:
     {
-        _state.KeyboardMessageSeen = true;
+        if (!_state.CharMessageSeen)
+        {
+            _state.CharMessageSeen = true;
+            _state.PendingPolledText.clear();
+            LOG_INFO("character messages seen; menu text comes from WM_CHAR");
+        }
         if (wParam != UNICODE_NOCHAR && wParam >= 0x20 && wParam <= 0xFFFF)
             _state.TextInput.push_back(static_cast<wchar_t>(wParam));
 

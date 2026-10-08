@@ -424,11 +424,16 @@ void PollVirtualKeyLocked(int vk, DWORD time)
 // reach its window (Death Stranding) leaves the fields empty, so translate polled presses instead.
 void PollTextInputLocked()
 {
-    if (_state.KeyboardMessageSeen || !_state.MenuVisible)
+    if (_state.CharMessageSeen || !_state.MenuVisible)
     {
         _state.PolledTextKeyDown.fill(false);
+        _state.PendingPolledText.clear();
         return;
     }
+
+    // Last frame's presses had a full message pump to produce WM_CHAR; none came, so they are text.
+    _state.TextInput += _state.PendingPolledText;
+    _state.PendingPolledText.clear();
 
     BYTE keyboard[256] {};
     for (int vk : { VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU })
@@ -463,7 +468,13 @@ void PollTextInputLocked()
         for (int i = 0; i < count; ++i)
         {
             if (chars[i] >= 0x20)
-                _state.TextInput.push_back(chars[i]);
+                _state.PendingPolledText.push_back(chars[i]);
+        }
+
+        if (count > 0 && !_state.PolledTextLogged)
+        {
+            _state.PolledTextLogged = true;
+            LOG_INFO("no character messages yet; menu text comes from polled keys (vk 0x{:02X})", vk);
         }
     }
 }
