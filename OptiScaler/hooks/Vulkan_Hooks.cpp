@@ -235,7 +235,21 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
         }
     }
 
+    // Finished picture on Vulkan: one extra compute queue of OptiScaler's own (see FinishedVkRequestQueue).
+    DlssNr::FinishedVkQueueRequest finishedQueue;
+    const bool wantFinishedQueue = Config::Instance()->DlssNrEnabled.value_or_default() &&
+                                   Config::Instance()->DlssNrFinishedPicture.value_or_default() &&
+                                   DlssNr::FinishedVkRequestQueue(physicalDevice, localCreteInfo, finishedQueue);
+    if (wantFinishedQueue)
+    {
+        localCreteInfo.pQueueCreateInfos = finishedQueue.infos.data();
+        localCreteInfo.queueCreateInfoCount = static_cast<uint32_t>(finishedQueue.infos.size());
+    }
+
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
+
+    if (wantFinishedQueue && result == VK_SUCCESS)
+        DlssNr::FinishedVkDeviceCreated(*pDevice, physicalDevice, finishedQueue);
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
         LOG_INFO("DLSS-NR Vulkan: vkCreateDevice returned {} with {} extensions requested", (int) result,
@@ -362,6 +376,15 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
             nrCreateInfo.imageUsage |=
                 capabilities.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         pCreateInfo = &nrCreateInfo;
+    }
+    // Finished picture's compute queue reads and writes the presented images, so they are shared by all families.
+    const auto finishedFamilies =
+        prepareNr ? DlssNr::FinishedVkSwapchainFamilies(device) : std::vector<uint32_t> {};
+    if (!finishedFamilies.empty())
+    {
+        nrCreateInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        nrCreateInfo.queueFamilyIndexCount = static_cast<uint32_t>(finishedFamilies.size());
+        nrCreateInfo.pQueueFamilyIndices = finishedFamilies.data();
     }
     ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
     VkResult result = VK_SUCCESS;

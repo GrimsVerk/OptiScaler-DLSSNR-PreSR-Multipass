@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "DlssNrFinished_Vk.h"
 #include "DlssNr_Image_Vk.h"
+#include "DlssNr_Status.h"
 #include <Config.h>
 #include <hooks/VulkanwDx12_Hooks.h>
 #include <algorithm>
@@ -26,8 +27,16 @@ struct Swapchain
     VkColorSpaceKHR space {};
     VkExtent2D size {};
     VkImageUsageFlags usage = 0;
+    bool concurrent = false; // images shared with every queue family (see FinishedVkSwapchainFamilies)
     std::vector<VkImage> images;
 } screen;
+struct PrivateQueue
+{
+    VkDevice device = VK_NULL_HANDLE;
+    VkPhysicalDevice physical = VK_NULL_HANDLE;
+    VkQueue queue = VK_NULL_HANDLE;
+    uint32_t family = UINT32_MAX;
+} privateQueue;
 std::string status = "Waiting for a finished Vulkan picture.";
 // Learned from submissions: games may evaluate DLSS on a compute queue and present from the graphics queue.
 std::map<VkQueue, uint32_t> queueFamilies;
@@ -41,6 +50,9 @@ struct HookTimes
     double maxMs = 0, maxLockMs = 0;
     uint64_t over4 = 0, over16 = 0, over50 = 0;
 } hookTimes, captureTimes;
+// GPU time of the present-time command buffer (copies, model and composition), summarised with the diagnostics.
+double presentGpuMs = 0, presentGpuMaxMs = 0;
+uint64_t presentGpuSamples = 0;
 bool DiagOn() { return Config::Instance()->DlssNrFinishedDiagnostics.value_or_default(); }
 void Diag(const std::string& key, const std::string& detail = {})
 {
@@ -67,6 +79,13 @@ void DiagSummary()
     };
     times("present hook", hookTimes);
     times("capture", captureTimes);
+    const auto nr = ReadStatus(Backend::Vulkan);
+    LOG_INFO("DLSS-NR Vulkan finished picture GPU time over the last 600 presents: present-time work mean {:.2f} ms "
+             "max {:.2f} ms ({} samples); NR model pass (either mode) {:.2f} ms",
+             presentGpuSamples ? presentGpuMs / presentGpuSamples : 0.0, presentGpuMaxMs, presentGpuSamples,
+             nr.gpuTime.value_or(0.0));
+    presentGpuMs = presentGpuMaxMs = 0;
+    presentGpuSamples = 0;
 }
 void RecordTime(HookTimes& t, std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point locked)
 {
@@ -108,6 +127,14 @@ void Transition(VkCommandBuffer cmd, ImageVk& image, VkImageLayout to)
     Transition(cmd, image.info.Image, image.layout, to);
     image.layout = to;
 }
+// Same-format copy: a transfer command, which compute queues also accept.
+void Copy(VkCommandBuffer cmd, VkImage from, VkImage to, VkExtent2D size)
+{
+    VkImageCopy region {};
+    region.srcSubresource = region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.extent = { size.width, size.height, 1 };
+    vkCmdCopyImage(cmd, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, to, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+}
 void Blit(VkCommandBuffer cmd, VkImage from, VkImage to, VkExtent2D size)
 {
     VkImageBlit region {};
@@ -134,6 +161,7 @@ struct FinishedVk::Impl
         // own pool.
         VkCommandPool presentPool = VK_NULL_HANDLE;
         VkCommandBuffer presentCmd = VK_NULL_HANDLE;
+        bool timed = false; // its timestamp pair holds a result not yet read
         uint32_t presentFamily = UINT32_MAX;
         VkQueue queue = VK_NULL_HANDLE;
         VkEvent captured = VK_NULL_HANDLE;
@@ -151,17 +179,35 @@ struct FinishedVk::Impl
     struct Work
     {
         ImageVk input, linear, output, encoded;
+        // Compute route: the screen picture copied in and out in the screen's own format (no blits on compute).
+        ImageVk screenIn, screenOut;
         VkQueue queue = VK_NULL_HANDLE;
         VkFence lastDone = VK_NULL_HANDLE;
     } work;
     std::vector<VkSemaphore> presentReady;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     uint64_t serial = 0, frames = 0;
-    Impl(DlssNr_Vk& s, VkDevice d, VkPhysicalDevice p) : shader(s), device(d), physical(p) {}
+    // Two timestamps per slot around the present-time work; a slot is reused only after its fence, so its last
+    // pair is complete when it is read.
+    VkQueryPool queryPool = VK_NULL_HANDLE;
+    double timestampPeriod = 0;
+    Impl(DlssNr_Vk& s, VkDevice d, VkPhysicalDevice p) : shader(s), device(d), physical(p)
+    {
+        VkPhysicalDeviceProperties props {};
+        vkGetPhysicalDeviceProperties(physical, &props);
+        timestampPeriod = props.limits.timestampPeriod;
+        VkQueryPoolCreateInfo qi { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = static_cast<uint32_t>(2 * slots.size());
+        if (vkCreateQueryPool(device, &qi, nullptr, &queryPool) != VK_SUCCESS)
+            queryPool = VK_NULL_HANDLE;
+    }
     ~Impl()
     {
         if (vkDeviceWaitIdle(device) != VK_SUCCESS)
             return;
+        if (queryPool)
+            vkDestroyQueryPool(device, queryPool, nullptr);
         for (auto& s : slots)
         {
             s.depth.Destroy(device);
@@ -176,6 +222,8 @@ struct FinishedVk::Impl
                 vkDestroyCommandPool(device, s.presentPool, nullptr);
         }
         work.input.Destroy(device);
+        work.screenIn.Destroy(device);
+        work.screenOut.Destroy(device);
         work.linear.Destroy(device);
         work.output.Destroy(device);
         work.encoded.Destroy(device);
@@ -386,12 +434,31 @@ struct FinishedVk::Impl
             Diag("present: capture and present on different queues",
                  std::format("capture queue {} family {}, present queue {} family {}", (void*) s.queue, s.family,
                              (void*) queue, presentFamily));
+        // Compute route: OptiScaler's own compute queue, swapchain images shared across families, an SDR screen
+        // format a compute shader can write. Otherwise the work runs on the present queue.
+        VkFormatProperties props {};
+        vkGetPhysicalDeviceFormatProperties(physical, screen.format, &props);
+        constexpr VkFormatFeatureFlags computeFeatures =
+            VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        const bool useCompute = privateQueue.device == device && privateQueue.queue && screen.concurrent &&
+                                screen.space == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
+                                (screen.format == VK_FORMAT_B8G8R8A8_UNORM ||
+                                 screen.format == VK_FORMAT_R8G8B8A8_UNORM ||
+                                 screen.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+                                 screen.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) &&
+                                (props.optimalTilingFeatures & computeFeatures) == computeFeatures;
+        Diag(useCompute ? "present: work on OptiScaler's compute queue" : "present: work on the present queue",
+             std::format("private queue {}, concurrent swapchain {}, format {}", (void*) privateQueue.queue,
+                         screen.concurrent, (int) screen.format));
+        const uint32_t workFamily = useCompute ? privateQueue.family : presentFamily;
+        VkQueue workQueue = useCompute ? privateQueue.queue : queue;
         // The game's own synchronisation orders its DLSS work before the present, so the capture is complete.
         VkCommandPool pool = s.pool;
         VkCommandBuffer cmd = s.cmd;
-        if (presentFamily != s.family)
+        if (workFamily != s.family)
         {
-            if (s.presentPool && s.presentFamily != presentFamily)
+            if (s.presentPool && s.presentFamily != workFamily)
             {
                 vkDestroyCommandPool(device, s.presentPool, nullptr);
                 s.presentPool = VK_NULL_HANDLE;
@@ -401,7 +468,7 @@ struct FinishedVk::Impl
             {
                 VkCommandPoolCreateInfo pi { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
                 pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-                pi.queueFamilyIndex = presentFamily;
+                pi.queueFamilyIndex = workFamily;
                 VkCommandBufferAllocateInfo ai { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
                 ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
                 ai.commandBufferCount = 1;
@@ -418,7 +485,7 @@ struct FinishedVk::Impl
                     s.presentPool = VK_NULL_HANDLE;
                     return false;
                 }
-                s.presentFamily = presentFamily;
+                s.presentFamily = workFamily;
             }
             pool = s.presentPool;
             cmd = s.presentCmd;
@@ -440,10 +507,9 @@ struct FinishedVk::Impl
             Say("This Vulkan screen colour space is not supported.");
             return false;
         }
-        VkFormatProperties props {};
-        vkGetPhysicalDeviceFormatProperties(physical, screen.format, &props);
-        if ((props.optimalTilingFeatures & (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) !=
-            (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT))
+        if (!useCompute &&
+            (props.optimalTilingFeatures & (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) !=
+                (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT))
         {
             Diag("present: screen format cannot be blitted", std::format("format {}", (int) screen.format));
             return false;
@@ -474,8 +540,8 @@ struct FinishedVk::Impl
         // waiting on the CPU there stalls the frame.
         const bool resize = work.input.Valid() && (work.input.info.Width != screen.size.width ||
                                                    work.input.info.Height != screen.size.height);
-        if (work.queue && work.queue != queue)
-            Diag("present: present queue changed since the last finished frame");
+        if (work.queue && work.queue != workQueue)
+            Diag("present: present-time work queue changed since the last finished frame");
         if (work.lastDone && resize && vkWaitForFences(device, 1, &work.lastDone, VK_TRUE, 1000000000) != VK_SUCCESS)
         {
             Diag("present: waiting for the previous present-time work failed");
@@ -491,7 +557,11 @@ struct FinishedVk::Impl
                          screen.size.height, (uint64_t) screen.size.width * screen.size.height * 8 / (1024 * 1024));
             return ok;
         };
-        if (!ensure(work.input) || !ensure(work.output) || (pq && (!ensure(work.linear) || !ensure(work.encoded))))
+        auto ensureScreen = [&](ImageVk& image)
+        { return image.Ensure(device, physical, screen.size.width, screen.size.height, screen.format); };
+        if (useCompute ? (!ensureScreen(work.screenIn) || !ensureScreen(work.screenOut) || !ensure(work.output))
+                       : (!ensure(work.input) || !ensure(work.output) ||
+                          (pq && (!ensure(work.linear) || !ensure(work.encoded)))))
         {
             Diag("present: screen-size work images could not be created");
             return false;
@@ -508,16 +578,39 @@ struct FinishedVk::Impl
             Diag("present: vkBeginCommandBuffer failed");
             return false;
         }
+        const uint32_t query = static_cast<uint32_t>(&s - slots.data()) * 2;
+        if (queryPool)
+        {
+            uint64_t ticks[2] {};
+            if (s.timed && vkGetQueryPoolResults(device, queryPool, query, 2, sizeof(ticks), ticks, sizeof(uint64_t),
+                                                 VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+                ticks[1] > ticks[0])
+            {
+                const double ms = (double) (ticks[1] - ticks[0]) * timestampPeriod / 1e6;
+                if (ms < 1000.0)
+                {
+                    presentGpuMs += ms;
+                    presentGpuMaxMs = std::max(presentGpuMaxMs, ms);
+                    ++presentGpuSamples;
+                }
+            }
+            s.timed = false;
+            vkCmdResetQueryPool(cmd, queryPool, query, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, query);
+        }
         Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        Transition(cmd, work.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        Blit(cmd, screen.images[index], work.input.info.Image, screen.size);
-        Transition(cmd, work.input, VK_IMAGE_LAYOUT_GENERAL);
+        ImageVk* input = useCompute ? &work.screenIn : &work.input;
+        Transition(cmd, *input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        if (useCompute)
+            Copy(cmd, screen.images[index], work.screenIn.info.Image, screen.size);
+        else
+            Blit(cmd, screen.images[index], work.input.info.Image, screen.size);
+        Transition(cmd, *input, VK_IMAGE_LAYOUT_GENERAL);
         Transition(cmd, work.output, VK_IMAGE_LAYOUT_GENERAL);
         Transition(cmd, s.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmd, s.motion, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        ImageVk* input = &work.input;
         bool colorReady = true;
-        if (pq)
+        if (pq && !useCompute)
         {
             Transition(cmd, work.linear, VK_IMAGE_LAYOUT_GENERAL);
             DlssNrConstants conversion {};
@@ -538,7 +631,21 @@ struct FinishedVk::Impl
             shader.Dispatch(cmd, input->info, s.depth.info, s.motion.info, work.output.info, frame, s.instance,
                             VK_IMAGE_LAYOUT_GENERAL, &ran);
         ImageVk* result = &work.output;
-        if (pq && ran)
+        if (useCompute && ran)
+        {
+            // Back to the screen's format with the plain copy shader; compute queues cannot blit.
+            Transition(cmd, work.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmd, work.screenOut, VK_IMAGE_LAYOUT_GENERAL);
+            DlssNrConstants copy {};
+            copy.Mode = DlssNrMode_Downsample;
+            copy.Width = screen.size.width;
+            copy.Height = screen.size.height;
+            colorReady = shader.Dispatch(cmd, copy, copy.Width, copy.Height, work.output.info.ImageView, VK_NULL_HANDLE,
+                                         VK_NULL_HANDLE, VK_NULL_HANDLE, work.screenOut.info.ImageView, VK_NULL_HANDLE,
+                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            result = &work.screenOut;
+        }
+        if (pq && ran && !useCompute)
         {
             Transition(cmd, work.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             Transition(cmd, work.encoded, VK_IMAGE_LAYOUT_GENERAL);
@@ -558,13 +665,21 @@ struct FinishedVk::Impl
             Transition(cmd, *result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            Blit(cmd, result->info.Image, screen.images[index], screen.size);
+            if (useCompute)
+                Copy(cmd, result->info.Image, screen.images[index], screen.size);
+            else
+                Blit(cmd, result->info.Image, screen.images[index], screen.size);
             Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         }
         else
             Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        if (queryPool)
+        {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, query + 1);
+            s.timed = true;
+        }
         if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
         {
             Diag("present: vkEndCommandBuffer failed");
@@ -584,12 +699,12 @@ struct FinishedVk::Impl
         submit.pCommandBuffers = &cmd;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &presentReady[index];
-        if (vkQueueSubmit(queue, 1, &submit, s.done) != VK_SUCCESS)
+        if (vkQueueSubmit(workQueue, 1, &submit, s.done) != VK_SUCCESS)
         {
             Say("Vulkan finished-picture submission failed.");
             return false;
         }
-        work.queue = queue;
+        work.queue = workQueue;
         work.lastDone = s.done;
         for (auto& old : slots)
             if (old.submitted && old.serial <= s.serial)
@@ -669,11 +784,88 @@ void FinishedVkSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwap
     screen.space = info.imageColorSpace;
     screen.size = info.imageExtent;
     screen.usage = info.imageUsage;
+    if (info.imageSharingMode == VK_SHARING_MODE_CONCURRENT && privateQueue.device == device)
+        for (uint32_t i = 0; i < info.queueFamilyIndexCount; ++i)
+            screen.concurrent |= info.pQueueFamilyIndices[i] == privateQueue.family;
     uint32_t count = 0;
     if (vkGetSwapchainImagesKHR(device, swapchain, &count, nullptr) != VK_SUCCESS)
         return;
     screen.images.resize(count);
     vkGetSwapchainImagesKHR(device, swapchain, &count, screen.images.data());
+}
+bool FinishedVkRequestQueue(VkPhysicalDevice physical, const VkDeviceCreateInfo& info, FinishedVkQueueRequest& out)
+{
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
+    // A compute family without graphics: the asynchronous queues the game's own DLSS work tends to use.
+    for (uint32_t f = 0; f < count; ++f)
+    {
+        const auto flags = families[f].queueFlags;
+        if (!(flags & VK_QUEUE_COMPUTE_BIT) || (flags & VK_QUEUE_GRAPHICS_BIT))
+            continue;
+        uint32_t requested = 0;
+        for (uint32_t i = 0; i < info.queueCreateInfoCount; ++i)
+            if (info.pQueueCreateInfos[i].queueFamilyIndex == f)
+                requested += info.pQueueCreateInfos[i].queueCount;
+        if (requested >= families[f].queueCount)
+            continue;
+        out = {};
+        out.family = f;
+        bool extended = false;
+        for (uint32_t i = 0; i < info.queueCreateInfoCount; ++i)
+        {
+            auto ci = info.pQueueCreateInfos[i];
+            std::vector<float> priorities(ci.pQueuePriorities, ci.pQueuePriorities + ci.queueCount);
+            if (ci.queueFamilyIndex == f && ci.flags == 0 && !extended)
+            {
+                out.index = ci.queueCount;
+                priorities.push_back(1.0f);
+                ++ci.queueCount;
+                extended = true;
+            }
+            out.infos.push_back(ci);
+            out.priorities.push_back(std::move(priorities));
+        }
+        if (!extended)
+        {
+            VkDeviceQueueCreateInfo ci { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+            ci.queueFamilyIndex = f;
+            ci.queueCount = 1;
+            out.index = 0;
+            out.infos.push_back(ci);
+            out.priorities.push_back({ 1.0f });
+        }
+        for (size_t i = 0; i < out.infos.size(); ++i)
+            out.infos[i].pQueuePriorities = out.priorities[i].data();
+        return true;
+    }
+    return false;
+}
+void FinishedVkDeviceCreated(VkDevice device, VkPhysicalDevice physical, const FinishedVkQueueRequest& request)
+{
+    std::lock_guard lock(finishedMutex);
+    VkQueue queue = VK_NULL_HANDLE;
+    vkGetDeviceQueue(device, request.family, request.index, &queue);
+    if (!queue)
+        return;
+    privateQueue = { device, physical, queue, request.family };
+    queueFamilies[queue] = request.family;
+    LOG_INFO("DLSS-NR Vulkan finished picture: OptiScaler compute queue {} (family {}, index {})", (void*) queue,
+             request.family, request.index);
+}
+std::vector<uint32_t> FinishedVkSwapchainFamilies(VkDevice device)
+{
+    std::lock_guard lock(finishedMutex);
+    if (privateQueue.device != device || !privateQueue.queue)
+        return {};
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(privateQueue.physical, &count, nullptr);
+    std::vector<uint32_t> families;
+    for (uint32_t i = 0; i < count; ++i)
+        families.push_back(i);
+    return families.size() > 1 ? families : std::vector<uint32_t> {};
 }
 void FinishedVkSubmitted(VkQueue queue, VkCommandBuffer cmd)
 {
