@@ -6415,6 +6415,9 @@ void MenuCommon::RenderLoggingSettings(RenderMenuContext& ctx)
             ImGui::EndCombo();
         }
 
+        // Streamline reads its log level and console setting once, when the game starts.
+        static const bool slDebugAtLaunch = config->StreamlineDebug.value_or_default();
+
         if (bool slDebug = config->StreamlineDebug.value_or_default();
             ImGui::Checkbox("Streamline debug logging", &slDebug))
         {
@@ -6423,8 +6426,21 @@ void MenuCommon::RenderLoggingSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Off: Streamline keeps its normal log level and never opens its console window; its "
                        "routine messages are only logged at Debug level.\n"
                        "On: Streamline logs everything (its console opens if the game asks for one) and its "
-                       "routine messages are logged at Information level.\n"
-                       "The log level and console change on the next launch.");
+                       "routine messages are logged at Information level.\n\n"
+                       "Requires a restart. Press Save Settings first, or the game starts with the saved "
+                       "value again.");
+
+        if (config->StreamlineDebug.value_or_default() != slDebugAtLaunch)
+        {
+            ImGui::Spacing();
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.f, 0.0f, 1.f)),
+                               "Press Save Settings and restart the game to apply this");
+            ImGui::Spacing();
+        }
+        else
+        {
+            ImGui::TextDisabled("Takes effect after Save Settings and a game restart");
+        }
     }
 }
 
