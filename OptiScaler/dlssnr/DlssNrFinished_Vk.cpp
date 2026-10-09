@@ -97,7 +97,8 @@ struct FinishedVk::Impl
     VkPhysicalDevice physical;
     struct Slot
     {
-        ImageVk depth, motion, input, linear, output, encoded;
+        // Per frame in flight: the game overwrites its depth and motion before the picture is presented.
+        ImageVk depth, motion;
         DlssNrFrameInfo_Vk frame {};
         VkInstance instance = VK_NULL_HANDLE;
         VkCommandBuffer producer = VK_NULL_HANDLE, cmd = VK_NULL_HANDLE;
@@ -115,6 +116,14 @@ struct FinishedVk::Impl
         bool pending = false, submitted = false, validCapture = false;
     };
     std::array<Slot, 4> slots;
+    // Screen-sized work images, shared by all slots: present-time work is recorded and submitted one frame after
+    // another on the present queue, and every Transition is a full barrier, so one set serves every frame.
+    struct Work
+    {
+        ImageVk input, linear, output, encoded;
+        VkQueue queue = VK_NULL_HANDLE;
+        VkFence lastDone = VK_NULL_HANDLE;
+    } work;
     std::vector<VkSemaphore> presentReady;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     uint64_t serial = 0, frames = 0;
@@ -127,10 +136,6 @@ struct FinishedVk::Impl
         {
             s.depth.Destroy(device);
             s.motion.Destroy(device);
-            s.input.Destroy(device);
-            s.linear.Destroy(device);
-            s.output.Destroy(device);
-            s.encoded.Destroy(device);
             if (s.captured)
                 vkDestroyEvent(device, s.captured, nullptr);
             if (s.done)
@@ -140,6 +145,10 @@ struct FinishedVk::Impl
             if (s.presentPool)
                 vkDestroyCommandPool(device, s.presentPool, nullptr);
         }
+        work.input.Destroy(device);
+        work.linear.Destroy(device);
+        work.output.Destroy(device);
+        work.encoded.Destroy(device);
         for (auto semaphore : presentReady)
             if (semaphore)
                 vkDestroySemaphore(device, semaphore, nullptr);
@@ -431,11 +440,26 @@ struct FinishedVk::Impl
                 return false;
             }
         }
+        // The shared work images must be idle before another queue uses them or before they are recreated.
+        const bool resize = work.input.Valid() && (work.input.info.Width != screen.size.width ||
+                                                   work.input.info.Height != screen.size.height);
+        if (work.lastDone && (resize || (work.queue && work.queue != queue)) &&
+            vkWaitForFences(device, 1, &work.lastDone, VK_TRUE, 1000000000) != VK_SUCCESS)
+        {
+            Diag("present: waiting for the previous present-time work failed");
+            return false;
+        }
         auto ensure = [&](ImageVk& image)
         {
-            return image.Ensure(device, physical, screen.size.width, screen.size.height, VK_FORMAT_R16G16B16A16_SFLOAT);
+            const bool existed = image.Valid();
+            const bool ok =
+                image.Ensure(device, physical, screen.size.width, screen.size.height, VK_FORMAT_R16G16B16A16_SFLOAT);
+            if (ok && !existed)
+                LOG_INFO("DLSS-NR Vulkan finished picture: allocated a {}x{} work image (~{} MB)", screen.size.width,
+                         screen.size.height, (uint64_t) screen.size.width * screen.size.height * 8 / (1024 * 1024));
+            return ok;
         };
-        if (!ensure(s.input) || !ensure(s.output) || (pq && (!ensure(s.linear) || !ensure(s.encoded))))
+        if (!ensure(work.input) || !ensure(work.output) || (pq && (!ensure(work.linear) || !ensure(work.encoded))))
         {
             Diag("present: screen-size work images could not be created");
             return false;
@@ -453,48 +477,48 @@ struct FinishedVk::Impl
             return false;
         }
         Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        Transition(cmd, s.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        Blit(cmd, screen.images[index], s.input.info.Image, screen.size);
-        Transition(cmd, s.input, VK_IMAGE_LAYOUT_GENERAL);
-        Transition(cmd, s.output, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, work.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        Blit(cmd, screen.images[index], work.input.info.Image, screen.size);
+        Transition(cmd, work.input, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, work.output, VK_IMAGE_LAYOUT_GENERAL);
         Transition(cmd, s.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmd, s.motion, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        ImageVk* input = &s.input;
+        ImageVk* input = &work.input;
         bool colorReady = true;
         if (pq)
         {
-            Transition(cmd, s.linear, VK_IMAGE_LAYOUT_GENERAL);
+            Transition(cmd, work.linear, VK_IMAGE_LAYOUT_GENERAL);
             DlssNrConstants conversion {};
             conversion.Width = screen.size.width;
             conversion.Height = screen.size.height;
-            Transition(cmd, s.input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            colorReady = shader.Dispatch(cmd, conversion, conversion.Width, conversion.Height, s.input.info.ImageView,
-                                         VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, s.linear.info.ImageView,
+            Transition(cmd, work.input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            colorReady = shader.Dispatch(cmd, conversion, conversion.Width, conversion.Height, work.input.info.ImageView,
+                                         VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, work.linear.info.ImageView,
                                          VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true);
-            input = &s.linear;
+            input = &work.linear;
         }
         auto frame = s.frame;
         frame.ColourIsLinearHdr = pq || scrgb || srgb;
         frame.WhitePointOverride = (pq || scrgb) ? 203.0f / 80.0f : srgb ? 1.0f : 0.0f;
         bool ran = false;
         if (colorReady)
-            shader.Dispatch(cmd, input->info, s.depth.info, s.motion.info, s.output.info, frame, s.instance,
+            shader.Dispatch(cmd, input->info, s.depth.info, s.motion.info, work.output.info, frame, s.instance,
                             VK_IMAGE_LAYOUT_GENERAL, &ran);
-        ImageVk* result = &s.output;
+        ImageVk* result = &work.output;
         if (pq && ran)
         {
-            Transition(cmd, s.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            Transition(cmd, s.encoded, VK_IMAGE_LAYOUT_GENERAL);
+            Transition(cmd, work.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmd, work.encoded, VK_IMAGE_LAYOUT_GENERAL);
             DlssNrConstants conversion {};
             conversion.Mode = 1;
             conversion.Width = screen.size.width;
             conversion.Height = screen.size.height;
             colorReady = shader.Dispatch(
-                cmd, conversion, conversion.Width, conversion.Height, s.output.info.ImageView, VK_NULL_HANDLE,
-                s.input.info.ImageView, VK_NULL_HANDLE, s.encoded.info.ImageView, VK_NULL_HANDLE,
+                cmd, conversion, conversion.Width, conversion.Height, work.output.info.ImageView, VK_NULL_HANDLE,
+                work.input.info.ImageView, VK_NULL_HANDLE, work.encoded.info.ImageView, VK_NULL_HANDLE,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true);
-            result = &s.encoded;
+            result = &work.encoded;
         }
         // The original presentable image is only modified after a successful model evaluation.
         if (ran && colorReady && Config::Instance()->DlssNrApplyModel.value_or_default())
@@ -533,6 +557,8 @@ struct FinishedVk::Impl
             Say("Vulkan finished-picture submission failed.");
             return false;
         }
+        work.queue = queue;
+        work.lastDone = s.done;
         for (auto& old : slots)
             if (old.submitted && old.serial <= s.serial)
                 old.pending = false;
