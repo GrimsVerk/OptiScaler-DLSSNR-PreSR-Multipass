@@ -111,7 +111,10 @@ void StreamlineHooks::streamlineLogCallback(sl::LogType type, const char* msg)
             LOG_WARN("{}", trimmed_msg);
             break;
         case sl::LogType::eInfo:
-            LOG_INFO("{}", trimmed_msg);
+            if (Config::Instance()->StreamlineDebug.value_or_default())
+                LOG_INFO("{}", trimmed_msg);
+            else
+                LOG_DEBUG("{}", trimmed_msg);
             break;
         case sl::LogType::eError:
             LOG_ERROR("{}", trimmed_msg);
@@ -136,7 +139,23 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
 
     if (localPref.logMessageCallback != &streamlineLogCallback)
         o_logCallback = localPref.logMessageCallback;
-    localPref.logLevel = sl::LogLevel::eCount;
+
+    // Streamline debug logging raises Streamline to its most verbose level, which also opens its console
+    // when the game asked for one. Otherwise keep the game's level (at least warnings and errors reach the
+    // callback) and never open the console.
+    if (Config::Instance()->StreamlineDebug.value_or_default())
+    {
+        localPref.logLevel = sl::LogLevel::eCount;
+    }
+    else
+    {
+        if (localPref.logLevel == sl::LogLevel::eOff)
+            localPref.logLevel = sl::LogLevel::eDefault;
+        localPref.showConsole = false;
+    }
+    LOG_INFO("Streamline logging: level {}, console {}, debug {}", (int) localPref.logLevel,
+             localPref.showConsole ? "on" : "off", Config::Instance()->StreamlineDebug.value_or_default());
+
     localPref.logMessageCallback = &streamlineLogCallback;
 
     // renderAPI is optional so need to be careful, should only matter for Vulkan
@@ -609,7 +628,10 @@ void StreamlineHooks::streamlineLogCallback_sl1(sl1::LogType type, const char* m
             LOG_WARN("{}", trimmed_msg);
             break;
         case sl1::LogType::eLogTypeInfo:
-            LOG_INFO("{}", trimmed_msg);
+            if (Config::Instance()->StreamlineDebug.value_or_default())
+                LOG_INFO("{}", trimmed_msg);
+            else
+                LOG_DEBUG("{}", trimmed_msg);
             break;
         case sl1::LogType::eLogTypeError:
             LOG_ERROR("{}", trimmed_msg);
@@ -634,7 +656,18 @@ bool StreamlineHooks::hkslInit_sl1(const sl1::Preferences& pref, int application
 
     if (localPref.logMessageCallback != &streamlineLogCallback_sl1)
         o_logCallback_sl1 = localPref.logMessageCallback;
-    localPref.logLevel = sl1::LogLevel::eLogLevelCount;
+
+    // Same policy as hkslInit.
+    if (Config::Instance()->StreamlineDebug.value_or_default())
+    {
+        localPref.logLevel = sl1::LogLevel::eLogLevelCount;
+    }
+    else
+    {
+        if (localPref.logLevel == sl1::LogLevel::eLogLevelOff)
+            localPref.logLevel = sl1::LogLevel::eLogLevelDefault;
+        localPref.showConsole = false;
+    }
     localPref.logMessageCallback = &streamlineLogCallback_sl1;
     return o_slInit_sl1(localPref, applicationId);
 }

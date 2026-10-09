@@ -511,6 +511,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             LogToDebug.set_from_config(readBool("Log", "LogToDebug"));
             LogToNGX.set_from_config(readBool("Log", "LogToNGX"));
             OpenConsole.set_from_config(readBool("Log", "OpenConsole"));
+            StreamlineDebug.set_from_config(readBool("Log", "StreamlineDebug"));
             DebugWait.set_from_config(readBool("Log", "DebugWait"));
             LogSingleFile.set_from_config(readBool("Log", "SingleFile"));
             LogAsync.set_from_config(readBool("Log", "LogAsync"));
@@ -1702,6 +1703,8 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.SetValue("Log", "LogToDebug", GetBoolValue(Instance()->LogToDebug.value_for_config()).c_str());
         ini.SetValue("Log", "LogToNGX", GetBoolValue(Instance()->LogToNGX.value_for_config()).c_str());
         ini.SetValue("Log", "OpenConsole", GetBoolValue(Instance()->OpenConsole.value_for_config()).c_str());
+        ini.SetValue("Log", "StreamlineDebug",
+                     GetBoolValue(Instance()->StreamlineDebug.value_for_config()).c_str());
         ini.SetValue("Log", "SingleFile", GetBoolValue(Instance()->LogSingleFile.value_for_config()).c_str());
         ini.SetValue("Log", "LogFileName",
                      wstring_to_string(Instance()->LogFileName.value_for_config_or(L"auto")).c_str());

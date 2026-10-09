@@ -6414,6 +6414,17 @@ void MenuCommon::RenderLoggingSettings(RenderMenuContext& ctx)
 
             ImGui::EndCombo();
         }
+
+        if (bool slDebug = config->StreamlineDebug.value_or_default();
+            ImGui::Checkbox("Streamline debug logging", &slDebug))
+        {
+            config->StreamlineDebug = slDebug;
+        }
+        ShowHelpMarker("Off: Streamline keeps its normal log level and never opens its console window; its "
+                       "routine messages are only logged at Debug level.\n"
+                       "On: Streamline logs everything (its console opens if the game asks for one) and its "
+                       "routine messages are logged at Information level.\n"
+                       "The log level and console change on the next launch.");
     }
 }
 

@@ -241,6 +241,7 @@ class Config
     CustomOptional<bool> LogToDebug { false };
     CustomOptional<bool> LogToNGX { false };
     CustomOptional<bool> OpenConsole { false };
+    CustomOptional<bool> StreamlineDebug { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
     CustomOptional<int> LogLevel { 0 };
     CustomOptional<std::wstring> LogFileName { L"OptiScaler.log" };
