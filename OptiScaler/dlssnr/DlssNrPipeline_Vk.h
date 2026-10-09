@@ -92,7 +92,18 @@ inline DlssNrFrameInfo_Vk FrameInfo(NVSDK_NGX_Parameter* parameters, bool before
     unsigned int width = 0, height = 0;
     parameters->Get(NVSDK_NGX_Parameter_OutWidth, &width);
     parameters->Get(NVSDK_NGX_Parameter_OutHeight, &height);
-    if (width && height)
+    // OutWidth/OutHeight double as the optimal-settings answer (the recommended render size). Games that query
+    // optimal settings every frame on the same parameter block (Indiana Jones) leave the render size there, so a
+    // value no larger than the render size while the output image is larger is not the output size.
+    unsigned int renderWidth = frame.RenderSubrectWidth, renderHeight = frame.RenderSubrectHeight;
+    if (!renderWidth || !renderHeight)
+    {
+        parameters->Get(NVSDK_NGX_Parameter_Width, &renderWidth);
+        parameters->Get(NVSDK_NGX_Parameter_Height, &renderHeight);
+    }
+    const bool outLooksLikeRenderSize = renderWidth && renderHeight && width <= renderWidth &&
+                                        height <= renderHeight && output.Width > width && output.Height > height;
+    if (width && height && !outLooksLikeRenderSize)
     {
         frame.OutputWidth = width;
         frame.OutputHeight = height;

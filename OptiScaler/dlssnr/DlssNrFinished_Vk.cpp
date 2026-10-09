@@ -28,6 +28,8 @@ struct Swapchain
     std::vector<VkImage> images;
 } screen;
 std::string status = "Waiting for a finished Vulkan picture.";
+// Learned from submissions: games may evaluate DLSS on a compute queue and present from the graphics queue.
+std::map<VkQueue, uint32_t> queueFamilies;
 uint64_t presentEpoch = 0;
 // Diagnostics ([DlssNr] FinishedDiagnostics): every early exit is counted, logged with its details the first
 // time it happens, and summarised every 600 presents. Behaviour does not change.
@@ -100,6 +102,11 @@ struct FinishedVk::Impl
         VkInstance instance = VK_NULL_HANDLE;
         VkCommandBuffer producer = VK_NULL_HANDLE, cmd = VK_NULL_HANDLE;
         VkCommandPool pool = VK_NULL_HANDLE, producerPool = VK_NULL_HANDLE;
+        // Present-time work runs on the present queue; when its family differs from the capture's, it gets its
+        // own pool.
+        VkCommandPool presentPool = VK_NULL_HANDLE;
+        VkCommandBuffer presentCmd = VK_NULL_HANDLE;
+        uint32_t presentFamily = UINT32_MAX;
         VkQueue queue = VK_NULL_HANDLE;
         VkEvent captured = VK_NULL_HANDLE;
         VkFence done = VK_NULL_HANDLE;
@@ -130,6 +137,8 @@ struct FinishedVk::Impl
                 vkDestroyFence(device, s.done, nullptr);
             if (s.pool)
                 vkDestroyCommandPool(device, s.pool, nullptr);
+            if (s.presentPool)
+                vkDestroyCommandPool(device, s.presentPool, nullptr);
         }
         for (auto semaphore : presentReady)
             if (semaphore)
@@ -161,6 +170,14 @@ struct FinishedVk::Impl
         {
             Say("Native Vulkan finished-picture NR runs at presentation; disable Generate model before upscale and "
                 "Generate before SR, apply after SR.");
+            return;
+        }
+        // Games can evaluate DLSS more than once per frame (Indiana Jones: a small second view). Only the call
+        // that produces the screen-sized picture belongs to the frame being presented.
+        if (frame.OutputWidth != screen.size.width || frame.OutputHeight != screen.size.height)
+        {
+            Diag(std::format("capture: skipped, DLSS output {}x{} is not the screen size {}x{}", frame.OutputWidth,
+                             frame.OutputHeight, screen.size.width, screen.size.height));
             return;
         }
         if (!depth.ImageView || !motion.ImageView)
@@ -234,8 +251,8 @@ struct FinishedVk::Impl
             Diag("capture: slot objects missing");
             return;
         }
-        if (!s.depth.Ensure(device, physical, depth.Width, depth.Height, VK_FORMAT_R32_SFLOAT) ||
-            !s.motion.Ensure(device, physical, motion.Width, motion.Height, VK_FORMAT_R32G32_SFLOAT))
+        if (!s.depth.Ensure(device, physical, depth.Width, depth.Height, VK_FORMAT_R32_SFLOAT, true) ||
+            !s.motion.Ensure(device, physical, motion.Width, motion.Height, VK_FORMAT_R32G32_SFLOAT, true))
         {
             Diag("capture: depth/motion copy images could not be created",
                  std::format("depth {}x{}, motion {}x{}", depth.Width, depth.Height, motion.Width, motion.Height));
@@ -302,7 +319,7 @@ struct FinishedVk::Impl
         }
         Slot* latest = nullptr;
         for (auto& s : slots)
-            if (s.pending && s.submitted && s.validCapture && s.queue == queue && s.epoch + 1 >= presentEpoch &&
+            if (s.pending && s.submitted && s.validCapture && s.epoch + 1 >= presentEpoch &&
                 s.frame.OutputWidth == screen.size.width && s.frame.OutputHeight == screen.size.height &&
                 (!latest || s.serial > latest->serial))
                 latest = &s;
@@ -319,6 +336,54 @@ struct FinishedVk::Impl
             return false;
         }
         auto& s = *latest;
+        const auto presentFamilyIt = queueFamilies.find(queue);
+        if (presentFamilyIt == queueFamilies.end())
+        {
+            Diag("present: present queue family unknown", std::format("queue {}", (void*) queue));
+            return false;
+        }
+        const uint32_t presentFamily = presentFamilyIt->second;
+        if (s.queue != queue)
+            Diag("present: capture and present on different queues",
+                 std::format("capture queue {} family {}, present queue {} family {}", (void*) s.queue, s.family,
+                             (void*) queue, presentFamily));
+        // The game's own synchronisation orders its DLSS work before the present, so the capture is complete.
+        VkCommandPool pool = s.pool;
+        VkCommandBuffer cmd = s.cmd;
+        if (presentFamily != s.family)
+        {
+            if (s.presentPool && s.presentFamily != presentFamily)
+            {
+                vkDestroyCommandPool(device, s.presentPool, nullptr);
+                s.presentPool = VK_NULL_HANDLE;
+                s.presentCmd = VK_NULL_HANDLE;
+            }
+            if (!s.presentPool)
+            {
+                VkCommandPoolCreateInfo pi { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+                pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+                pi.queueFamilyIndex = presentFamily;
+                VkCommandBufferAllocateInfo ai { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+                ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                ai.commandBufferCount = 1;
+                if (vkCreateCommandPool(device, &pi, nullptr, &s.presentPool) != VK_SUCCESS)
+                {
+                    Diag("present: present-family command pool creation failed");
+                    return false;
+                }
+                ai.commandPool = s.presentPool;
+                if (vkAllocateCommandBuffers(device, &ai, &s.presentCmd) != VK_SUCCESS)
+                {
+                    Diag("present: present-family command buffer allocation failed");
+                    vkDestroyCommandPool(device, s.presentPool, nullptr);
+                    s.presentPool = VK_NULL_HANDLE;
+                    return false;
+                }
+                s.presentFamily = presentFamily;
+            }
+            pool = s.presentPool;
+            cmd = s.presentCmd;
+        }
         if ((screen.usage & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) !=
             (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         {
@@ -375,35 +440,35 @@ struct FinishedVk::Impl
             Diag("present: screen-size work images could not be created");
             return false;
         }
-        if (vkResetCommandPool(device, s.pool, 0) != VK_SUCCESS)
+        if (vkResetCommandPool(device, pool, 0) != VK_SUCCESS)
         {
             Diag("present: vkResetCommandPool failed");
             return false;
         }
         VkCommandBufferBeginInfo bi { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(s.cmd, &bi) != VK_SUCCESS)
+        if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS)
         {
             Diag("present: vkBeginCommandBuffer failed");
             return false;
         }
-        Transition(s.cmd, screen.images[index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        Transition(s.cmd, s.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        Blit(s.cmd, screen.images[index], s.input.info.Image, screen.size);
-        Transition(s.cmd, s.input, VK_IMAGE_LAYOUT_GENERAL);
-        Transition(s.cmd, s.output, VK_IMAGE_LAYOUT_GENERAL);
-        Transition(s.cmd, s.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        Transition(s.cmd, s.motion, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Transition(cmd, s.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        Blit(cmd, screen.images[index], s.input.info.Image, screen.size);
+        Transition(cmd, s.input, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, s.output, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, s.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmd, s.motion, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         ImageVk* input = &s.input;
         bool colorReady = true;
         if (pq)
         {
-            Transition(s.cmd, s.linear, VK_IMAGE_LAYOUT_GENERAL);
+            Transition(cmd, s.linear, VK_IMAGE_LAYOUT_GENERAL);
             DlssNrConstants conversion {};
             conversion.Width = screen.size.width;
             conversion.Height = screen.size.height;
-            Transition(s.cmd, s.input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            colorReady = shader.Dispatch(s.cmd, conversion, conversion.Width, conversion.Height, s.input.info.ImageView,
+            Transition(cmd, s.input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            colorReady = shader.Dispatch(cmd, conversion, conversion.Width, conversion.Height, s.input.info.ImageView,
                                          VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, s.linear.info.ImageView,
                                          VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true);
@@ -414,19 +479,19 @@ struct FinishedVk::Impl
         frame.WhitePointOverride = (pq || scrgb) ? 203.0f / 80.0f : srgb ? 1.0f : 0.0f;
         bool ran = false;
         if (colorReady)
-            shader.Dispatch(s.cmd, input->info, s.depth.info, s.motion.info, s.output.info, frame, s.instance,
+            shader.Dispatch(cmd, input->info, s.depth.info, s.motion.info, s.output.info, frame, s.instance,
                             VK_IMAGE_LAYOUT_GENERAL, &ran);
         ImageVk* result = &s.output;
         if (pq && ran)
         {
-            Transition(s.cmd, s.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            Transition(s.cmd, s.encoded, VK_IMAGE_LAYOUT_GENERAL);
+            Transition(cmd, s.output, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmd, s.encoded, VK_IMAGE_LAYOUT_GENERAL);
             DlssNrConstants conversion {};
             conversion.Mode = 1;
             conversion.Width = screen.size.width;
             conversion.Height = screen.size.height;
             colorReady = shader.Dispatch(
-                s.cmd, conversion, conversion.Width, conversion.Height, s.output.info.ImageView, VK_NULL_HANDLE,
+                cmd, conversion, conversion.Width, conversion.Height, s.output.info.ImageView, VK_NULL_HANDLE,
                 s.input.info.ImageView, VK_NULL_HANDLE, s.encoded.info.ImageView, VK_NULL_HANDLE,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true);
             result = &s.encoded;
@@ -434,17 +499,17 @@ struct FinishedVk::Impl
         // The original presentable image is only modified after a successful model evaluation.
         if (ran && colorReady && Config::Instance()->DlssNrApplyModel.value_or_default())
         {
-            Transition(s.cmd, *result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            Transition(s.cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            Transition(cmd, *result, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            Blit(s.cmd, result->info.Image, screen.images[index], screen.size);
-            Transition(s.cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            Blit(cmd, result->info.Image, screen.images[index], screen.size);
+            Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         }
         else
-            Transition(s.cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            Transition(cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-        if (vkEndCommandBuffer(s.cmd) != VK_SUCCESS)
+        if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
         {
             Diag("present: vkEndCommandBuffer failed");
             return false;
@@ -460,7 +525,7 @@ struct FinishedVk::Impl
         submit.pWaitSemaphores = present->pWaitSemaphores;
         submit.pWaitDstStageMask = stages.data();
         submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &s.cmd;
+        submit.pCommandBuffers = &cmd;
         submit.signalSemaphoreCount = 1;
         submit.pSignalSemaphores = &presentReady[index];
         if (vkQueueSubmit(queue, 1, &submit, s.done) != VK_SUCCESS)
@@ -553,6 +618,14 @@ void FinishedVkSubmitted(VkQueue queue, VkCommandBuffer cmd)
     if (State::Instance().isShuttingDown)
         return;
     std::lock_guard lock(finishedMutex);
+    if (!queueFamilies.contains(queue))
+    {
+        if (auto family = Vulkan_wDx12::cmdBufferStateTracker.GetCommandBufferQueueFamily(cmd))
+        {
+            queueFamilies[queue] = *family;
+            Diag("submit: learned a queue family", std::format("queue {} family {}", (void*) queue, *family));
+        }
+    }
     for (auto* owner : owners)
         owner->Submitted(queue, cmd);
 }

@@ -34,12 +34,28 @@ struct ImageVk
         *this = {};
     }
 
-    bool Ensure(VkDevice device, VkPhysicalDevice physical, uint32_t width, uint32_t height, VkFormat format)
+    // allQueueFamilies: concurrent sharing, for images written on one queue family and read on another.
+    bool Ensure(VkDevice device, VkPhysicalDevice physical, uint32_t width, uint32_t height, VkFormat format,
+                bool allQueueFamilies = false)
     {
         if (Valid() && info.Width == width && info.Height == height && info.Format == format)
             return true;
         Destroy(device);
         VkImageCreateInfo ci { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        std::vector<uint32_t> families;
+        if (allQueueFamilies)
+        {
+            uint32_t count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
+            for (uint32_t i = 0; i < count; ++i)
+                families.push_back(i);
+        }
+        if (families.size() > 1)
+        {
+            ci.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            ci.queueFamilyIndexCount = static_cast<uint32_t>(families.size());
+            ci.pQueueFamilyIndices = families.data();
+        }
         ci.imageType = VK_IMAGE_TYPE_2D;
         ci.format = format;
         ci.extent = { width, height, 1 };
