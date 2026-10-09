@@ -5,6 +5,7 @@
 #include <hooks/VulkanwDx12_Hooks.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <format>
 #include <map>
 #include <mutex>
@@ -34,6 +35,12 @@ uint64_t presentEpoch = 0;
 // Diagnostics ([DlssNr] FinishedDiagnostics): every early exit is counted, logged with its details the first
 // time it happens, and summarised every 600 presents. Behaviour does not change.
 std::map<std::string, uint64_t> diagCounts;
+// Present-hook CPU time (lock wait included), summarised with the diagnostics.
+struct HookTimes
+{
+    double maxMs = 0, maxLockMs = 0;
+    uint64_t over4 = 0, over16 = 0, over50 = 0;
+} hookTimes, captureTimes;
 bool DiagOn() { return Config::Instance()->DlssNrFinishedDiagnostics.value_or_default(); }
 void Diag(const std::string& key, const std::string& detail = {})
 {
@@ -51,6 +58,26 @@ void DiagSummary()
         line += std::format("{}{}={}", line.empty() ? "" : ", ", key, count);
     LOG_INFO("DLSS-NR Vulkan finished picture diagnostic summary after {} presents: {}", presentEpoch,
              line.empty() ? "nothing recorded" : line);
+    auto times = [](const char* name, HookTimes& t)
+    {
+        LOG_INFO("DLSS-NR Vulkan finished picture {} CPU time over the last 600 presents: max {:.2f} ms (lock wait "
+                 "max {:.2f} ms), >4 ms {}, >16 ms {}, >50 ms {}",
+                 name, t.maxMs, t.maxLockMs, t.over4, t.over16, t.over50);
+        t = {};
+    };
+    times("present hook", hookTimes);
+    times("capture", captureTimes);
+}
+void RecordTime(HookTimes& t, std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point locked)
+{
+    const auto now = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - start).count();
+    const double lockMs = std::chrono::duration<double, std::milli>(locked - start).count();
+    t.maxMs = std::max(t.maxMs, ms);
+    t.maxLockMs = std::max(t.maxLockMs, lockMs);
+    t.over4 += ms > 4;
+    t.over16 += ms > 16;
+    t.over50 += ms > 50;
 }
 void Say(const char* message)
 {
@@ -440,11 +467,13 @@ struct FinishedVk::Impl
                 return false;
             }
         }
-        // The shared work images must be idle before another queue uses them or before they are recreated.
+        // The shared work images must be idle before they are recreated. A present-queue change is only counted:
+        // waiting on the CPU there stalls the frame.
         const bool resize = work.input.Valid() && (work.input.info.Width != screen.size.width ||
                                                    work.input.info.Height != screen.size.height);
-        if (work.lastDone && (resize || (work.queue && work.queue != queue)) &&
-            vkWaitForFences(device, 1, &work.lastDone, VK_TRUE, 1000000000) != VK_SUCCESS)
+        if (work.queue && work.queue != queue)
+            Diag("present: present queue changed since the last finished frame");
+        if (work.lastDone && resize && vkWaitForFences(device, 1, &work.lastDone, VK_TRUE, 1000000000) != VK_SUCCESS)
         {
             Diag("present: waiting for the previous present-time work failed");
             return false;
@@ -589,8 +618,12 @@ FinishedVk::~FinishedVk()
 void FinishedVk::Capture(VkCommandBuffer cmd, const VkImageInfo& depth, const VkImageInfo& motion,
                          const DlssNrFrameInfo_Vk& frame, VkInstance instance)
 {
+    const auto start = std::chrono::steady_clock::now();
     std::lock_guard lock(finishedMutex);
+    const auto locked = std::chrono::steady_clock::now();
     impl->Capture(cmd, depth, motion, frame, instance);
+    if (DiagOn())
+        RecordTime(captureTimes, start, locked);
 }
 void FinishedVk::Submitted(VkQueue queue, VkCommandBuffer cmd)
 {
@@ -675,7 +708,18 @@ void FinishedVkPresent(VkQueue queue, VkPresentInfoKHR* present)
 {
     if (State::Instance().isShuttingDown)
         return;
+    const auto start = std::chrono::steady_clock::now();
     std::lock_guard lock(finishedMutex);
+    const auto locked = std::chrono::steady_clock::now();
+    struct Timer
+    {
+        std::chrono::steady_clock::time_point start, locked;
+        ~Timer()
+        {
+            if (DiagOn())
+                RecordTime(hookTimes, start, locked);
+        }
+    } timer { start, locked };
     if (owners.empty())
         Diag("present: no NR finished-picture owner exists yet");
     for (auto* owner : owners)
