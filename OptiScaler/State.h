@@ -311,7 +311,10 @@ class State
 
     // Vulkan stuff
     bool vulkanCreatingSC = false;
-    bool creatingD3DDevice = false;
+    // Per thread: DXVK/VKD3D create their Vulkan objects on the thread that creates the D3D device. As one shared
+    // flag, two threads saving and restoring it could leave it stuck on, after which every Vulkan instance and
+    // device the game created was skipped (Indiana Jones: no command-pool tracking for the whole session).
+    static inline thread_local bool creatingD3DDevice = false;
     bool vulkanSkipHooks = false;
     VkInstance VulkanInstance = nullptr;
 
