@@ -28,6 +28,7 @@
 #include "DlssNr_Spatial.h"
 #include <dlssnr/DlssNr_Image_Vk.h>
 #include <memory>
+#include <mutex>
 
 namespace DlssNr
 {
@@ -51,8 +52,11 @@ class DlssNr_Vk : public Shader_Vk
     // Worst finished-picture frame: one clean copy before the seam, two captured guides,
     // two colour conversions, then a copy and nine model/composition dispatches (including
     // exposure and spatial packing). Clamp layers reuse their two immutable slots: 15 total.
+    // A descriptor set rewritten while a pending command buffer still binds it is undefined behaviour. The
+    // finished picture records some dispatches in the game's command buffers (often a frame or more before they
+    // run) and the rest at present time, so the ring is sized well past any realistic GPU queue depth.
     static constexpr uint32_t kSlotsPerFrame = 16;
-    static constexpr uint32_t kFramesInFlight = 4;
+    static constexpr uint32_t kFramesInFlight = 16;
     static constexpr uint32_t kSlots = kSlotsPerFrame * kFramesInFlight;
 
     std::unique_ptr<DlssNr::ModelVk> _model;
@@ -65,6 +69,8 @@ class DlssNr_Vk : public Shader_Vk
 
     VkDeviceSize _slotStride = 0; // sizeof(DlssNrConstants), rounded up to the device's alignment
     uint32_t _slot = 0;           // next slot to hand out, wrapping
+    // The finished picture dispatches from the present thread as well as the game's DLSS thread.
+    std::mutex _slotMutex;
 
     // Stands in for a resource a given mode does not read. One pixel, never sampled for its content,
     // present only because Vulkan will not accept an unwritten binding.

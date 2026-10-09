@@ -223,6 +223,7 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
     if (!CreateDummy(InCmdList))
         return false;
 
+    std::unique_lock slotLock(_slotMutex);
     const bool reuse = immutableSlot && *immutableSlot != UINT32_MAX;
     const uint32_t slot = reuse ? *immutableSlot : _slot;
     if (!reuse)
@@ -236,6 +237,7 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
         if (immutableSlot)
             *immutableSlot = slot;
     }
+    slotLock.unlock();
 
     vkCmdBindPipeline(InCmdList, VK_PIPELINE_BIND_POINT_COMPUTE,
                       pipelineOverride ? pipelineOverride : finishedColor ? _finishedPipeline : _pipeline);
@@ -269,12 +271,14 @@ bool DlssNr_Vk::DispatchSpatial(VkCommandBuffer cmd, const DlssNr::Spatial::Cons
     if (!SpatialReady() || cmd == VK_NULL_HANDLE || target == VK_NULL_HANDLE || !CreateDummy(cmd))
         return false;
 
+    std::unique_lock slotLock(_slotMutex);
     const uint32_t slot = _slot;
     _slot = (_slot + 1) % kSlots;
     const VkDeviceSize offset = _slotStride * slot;
     std::memcpy((char*) _mappedConstantBuffer + offset, &constants, sizeof(constants));
     WriteDescriptors(_descriptorSets[slot], offset, source, second, third, VK_NULL_HANDLE, target, keep, sourceLayout,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, secondLayout, thirdLayout);
+    slotLock.unlock();
 
     const VkPipeline pipeline = constants.mode == 101 ? _spatialGuidesPipeline : _spatialPipeline;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
