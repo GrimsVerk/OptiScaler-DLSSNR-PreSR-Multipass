@@ -142,7 +142,10 @@ struct FinishedVk::Impl
         uint64_t epoch = 0, serial = 0;
         bool pending = false, submitted = false, validCapture = false;
     };
-    std::array<Slot, 4> slots;
+    // A slot holds one frame's depth and motion copies (about 24 MB at 1080p) from capture until its present-time
+    // work has finished on the GPU. The GPU runs a few frames behind, so four slots ran out on about a quarter of
+    // the frames in Indiana Jones, and those frames went out without NR.
+    std::array<Slot, 8> slots;
     // Screen-sized work images, shared by all slots: present-time work is recorded and submitted one frame after
     // another on the present queue, and every Transition is a full barrier, so one set serves every frame.
     struct Work
