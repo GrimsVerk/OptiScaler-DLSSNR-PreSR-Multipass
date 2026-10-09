@@ -112,7 +112,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     void SubmitFinishedCommands(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
     bool WaitFinished();
     void ApplyFinished(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
-                       bool gameFrameHandoff = false);
+                       bool gameFrameHandoff = false, bool armScreenCapture = false);
     void ApplyFinishedDx11(IDXGISwapChain* swapchain);
     std::string FinishedStatus();
     std::string DeferredStatus();

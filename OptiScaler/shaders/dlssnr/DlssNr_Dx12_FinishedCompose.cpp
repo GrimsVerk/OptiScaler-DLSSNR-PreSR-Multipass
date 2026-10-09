@@ -1,5 +1,132 @@
 #include "pch.h"
 #include "DlssNr_Dx12_State.h"
+#include <thread>
+
+auto DlssNr_Dx12::State::ArmScreenCapture() -> void
+{
+    if (screenCapture.remaining)
+        return;
+    if (screenCapture.runs >= 8)
+    {
+        LOG_WARN("NR screen capture: eight-run limit reached; restart to capture again");
+        return;
+    }
+    ++screenCapture.runs;
+    SYSTEMTIME time {};
+    GetLocalTime(&time);
+    char folder[100];
+    std::snprintf(folder, sizeof(folder), "%04u%02u%02u-%02u%02u%02u-%03u-screen-%u", time.wYear, time.wMonth,
+                  time.wDay, time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, screenCapture.runs);
+    screenCapture.directory = Util::DllPath().parent_path() / "nr-pipeline-captures" / folder;
+    screenCapture.remaining = 4;
+    screenCapture.taken = 0;
+    dlssNrScreenCaptureArmed = true;
+    LOG_INFO("NR screen capture armed: {} (four presents)", screenCapture.directory.string());
+}
+
+auto DlssNr_Dx12::State::BeginScreenCapture(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
+                                            ID3D12Resource* color, const char* mode, DXGI_COLOR_SPACE_TYPE space)
+    -> DlssNr::PipelineCaptureFrame*
+{
+    if (!screenCapture.remaining || !cmd || !device || !color)
+        return nullptr;
+    auto job = std::make_unique<DlssNr::PipelineCaptureFrame>();
+    if (!job->Init(device))
+    {
+        screenCapture.remaining = 0;
+        dlssNrScreenCaptureArmed = false;
+        LOG_ERROR("NR screen capture allocation failed");
+        return nullptr;
+    }
+    job->directory = screenCapture.directory / std::to_string(screenCapture.taken);
+    const auto& cfg = *Config::Instance();
+    job->metadata << "screen_capture mode " << mode << " game_frame " << ::State::Instance().frameCount
+                  << " colour_space " << unsigned(space) << '\n'
+                  << "stage_semantics screen_before_nr=presented_picture_before_finished_NR "
+                     "screen_after_nr=presented_picture_after_finished_NR screen=presented_picture\n"
+                  << "white_point_source " << cfg.DlssNrWhitePointSource.value_or_default() << " white_point_scale "
+                  << cfg.DlssNrWhitePointScale.value_or_default() << " apply_model "
+                  << cfg.DlssNrApplyModel.value_or_default() << " nr_passes " << cfg.DlssNrPasses.value_or_default()
+                  << " working_scale " << cfg.DlssNrWorkingScale.value_or_default() << " run_before_sr "
+                  << cfg.DlssNrRunBeforeSr.value_or_default() << '\n';
+    job->Copy(cmd, device, std::strcmp(mode, "finished") == 0 ? "screen_before_nr" : "screen", color,
+              D3D12_RESOURCE_STATE_PRESENT);
+    return job.release();
+}
+
+auto DlssNr_Dx12::State::CommitScreenCapture(DlssNr::PipelineCaptureFrame* job, ID3D12Fence* fence, UINT64 value,
+                                             ID3D12CommandAllocator* allocator, ID3D12GraphicsCommandList* list)
+    -> void
+{
+    screenCapture.pending.push_back({ job, fence, value, allocator, list });
+    ++screenCapture.taken;
+    if (screenCapture.remaining && --screenCapture.remaining == 0)
+        dlssNrScreenCaptureArmed = false;
+}
+
+auto DlssNr_Dx12::State::CaptureFinalScreen(ID3D12Resource* color, ID3D12CommandQueue* queue,
+                                            DXGI_COLOR_SPACE_TYPE space) -> void
+{
+    if (!screenCapture.remaining || !color || !queue)
+        return;
+    const auto type = queue->GetDesc().Type;
+    if (type != D3D12_COMMAND_LIST_TYPE_DIRECT && type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        return;
+    LateContext::ComPtr<ID3D12Device> device;
+    LateContext::ComPtr<ID3D12CommandAllocator> allocator;
+    LateContext::ComPtr<ID3D12GraphicsCommandList> list;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))) ||
+        (!screenCapture.fence && FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                            IID_PPV_ARGS(&screenCapture.fence)))) ||
+        FAILED(device->CreateCommandAllocator(type, IID_PPV_ARGS(&allocator))) ||
+        FAILED(device->CreateCommandList(0, type, allocator.Get(), nullptr, IID_PPV_ARGS(&list))))
+        return;
+    auto* job = BeginScreenCapture(list.Get(), device.Get(), color, "final", space);
+    if (!job)
+        return;
+    job->End(list.Get());
+    if (FAILED(list->Close()))
+    {
+        delete job;
+        return;
+    }
+    ID3D12CommandList* lists[] = { list.Get() };
+    queue->ExecuteCommandLists(1, lists);
+    if (FAILED(queue->Signal(screenCapture.fence.Get(), ++screenCapture.fenceValue)))
+        return; // the readbacks may still be in flight: keep the job rather than free them
+    CommitScreenCapture(job, screenCapture.fence.Get(), screenCapture.fenceValue, allocator.Get(), list.Get());
+}
+
+auto DlssNr_Dx12::State::CollectScreenCaptures() -> void
+{
+    for (auto it = screenCapture.pending.begin(); it != screenCapture.pending.end();)
+    {
+        const auto completed = it->fence->GetCompletedValue();
+        if (completed == UINT64_MAX)
+        {
+            LOG_WARN("NR screen capture discarded: the device was removed");
+            it = screenCapture.pending.erase(it); // the readbacks are abandoned, not freed under the GPU
+            continue;
+        }
+        if (completed < it->value)
+        {
+            ++it;
+            continue;
+        }
+        // 4K readbacks take a while to write; keep that off the presentation thread.
+        std::thread(
+            [job = it->job]
+            {
+                if (job->Write())
+                    LOG_INFO("NR screen capture saved: {}", job->directory.string());
+                else
+                    LOG_WARN("NR screen capture discarded or write failed: {}", job->directory.string());
+                delete job;
+            })
+            .detach();
+        it = screenCapture.pending.erase(it);
+    }
+}
 
 auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12CommandQueue* queue,
                                             DXGI_COLOR_SPACE_TYPE colorSpace, bool gameFrameHandoff) -> bool
@@ -118,6 +245,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         return false;
     }
     auto* cmd = slot.commands.Get();
+    auto* screenJob = BeginScreenCapture(cmd, late.device.Get(), color, "finished", colorSpace);
     if (holdFinished)
     {
         const bool capture =
@@ -307,8 +435,16 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
         Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     }
+    if (screenJob)
+    {
+        screenJob->metadata << "nr_ran " << (slot.residualOnly ? appliedResidual : nr.successfulDispatches > before)
+                            << " history_reset " << (slot.frame.Reset || late.reset) << '\n';
+        screenJob->Copy(cmd, late.device.Get(), "screen_after_nr", color, D3D12_RESOURCE_STATE_PRESENT);
+        screenJob->End(cmd);
+    }
     if (FAILED(cmd->Close()))
     {
+        delete screenJob;
         late.heldFailed |= holdFinished;
         late.Say("Could not finish the picture. Restart the game to retry.");
         slot.pending = true; // quarantine the slot; do not reuse possibly recorded NR resources
@@ -319,6 +455,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     if (slot.producerQueue.Get() != realQueue && slot.fence->GetCompletedValue() < slot.ready &&
         FAILED(queue->Wait(slot.fence.Get(), slot.ready)))
     {
+        delete screenJob;
         late.Say("The graphics queue stopped. Restart the game to retry.");
         return false;
     }
@@ -331,6 +468,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         late.Say("The graphics queue stopped. Restart the game to retry.");
         return false;
     }
+    if (screenJob)
+        CommitScreenCapture(screenJob, slot.fence.Get(), slot.done);
     if (holdFinished)
     {
         late.heldFence = slot.fence;

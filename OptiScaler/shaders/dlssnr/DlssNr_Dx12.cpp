@@ -780,12 +780,19 @@ void DlssNr_Dx12::SubmitFinishedCommands(ID3D12CommandQueue* queue, UINT count, 
 }
 bool DlssNr_Dx12::WaitFinished() { return _state->WaitForFinishedPicture(); }
 void DlssNr_Dx12::ApplyFinished(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
-                                bool gameFrameHandoff)
+                                bool gameFrameHandoff, bool armScreenCapture)
 {
     std::lock_guard lock(_state->mutex);
+    if (armScreenCapture)
+        _state->ArmScreenCapture();
+    _state->CollectScreenCaptures();
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
         !Config::Instance()->DlssNrEnabled.value_or_default())
+    {
         _state->late.Cancel();
+        if (picture && queue)
+            _state->CaptureFinalScreen(picture, queue, space);
+    }
     else if (picture && queue)
         _state->ApplyFinishedColor(picture, queue, space, gameFrameHandoff);
     _state->Publish();
@@ -847,9 +854,18 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     Microsoft::WRL::ComPtr<ID3D12Resource> picture;
     auto space = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     const auto& config = *Config::Instance();
+    // Ctrl+F8 in the game window also records the presented picture (see ArmScreenCapture).
+    static bool previousCaptureKeys = false;
+    DWORD foregroundProcess = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
+    const bool captureKeys = foregroundProcess == GetCurrentProcessId() &&
+                             (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 && (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+    const bool armScreenCapture = captureKeys && !previousCaptureKeys;
+    previousCaptureKeys = captureKeys;
+    const bool screenCapture = armScreenCapture || dlssNrScreenCaptureArmed.load();
     // Swapchain calls must precede NR locks: FG Present can submit commands while holding its own lock.
     if (swapchain && queue && config.DlssNrEnabled.value_or_default() &&
-        config.DlssNrFinishedPicture.value_or_default())
+        (config.DlssNrFinishedPicture.value_or_default() || screenCapture))
     {
         if (StreamlinePicture::RenderQueue(swapchain) || FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&chain))) ||
             FAILED(chain->GetBuffer(chain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&picture))))
@@ -858,7 +874,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     }
     std::lock_guard lock(nrOwnersMutex);
     if (activeNrOwner)
-        activeNrOwner->ApplyFinished(picture.Get(), queue, space);
+        activeNrOwner->ApplyFinished(picture.Get(), queue, space, false, armScreenCapture);
 }
 void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture, ID3D12CommandQueue* queue)
 {

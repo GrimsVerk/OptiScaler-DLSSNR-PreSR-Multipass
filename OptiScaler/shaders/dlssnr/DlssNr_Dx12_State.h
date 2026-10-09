@@ -38,6 +38,10 @@
 
 #include <mutex>
 #include <algorithm>
+#include <atomic>
+
+// Set while a Ctrl+F8 screen capture still has presents to record; read by the present hook before NR locks.
+inline std::atomic_bool dlssNrScreenCaptureArmed { false };
 #include <cstring>
 #include "DlssNr_ResidualPair.h"
 #include "../output_scaling/OS_Dx12.h"
@@ -91,6 +95,33 @@ struct DlssNr_Dx12::State
     DlssNr::PipelineCaptureFrame* pipelineCapture = nullptr; // Owned by lifetime retirement after End.
     std::filesystem::path pipelineCaptureDirectory;
     unsigned pipelineCaptureRemaining = 0;
+
+    // Ctrl+F8 also records four presented pictures: before and after NR when NR runs on the finished picture, the
+    // final picture otherwise, so both placements can be compared in display space.
+    struct ScreenCapture
+    {
+        struct Pending
+        {
+            DlssNr::PipelineCaptureFrame* job = nullptr;
+            Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+            UINT64 value = 0;
+            Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+        };
+        std::filesystem::path directory;
+        unsigned remaining = 0, taken = 0, runs = 0;
+        std::vector<Pending> pending;
+        Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+        UINT64 fenceValue = 0;
+    } screenCapture;
+    void ArmScreenCapture();
+    DlssNr::PipelineCaptureFrame* BeginScreenCapture(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
+                                                     ID3D12Resource* color, const char* mode,
+                                                     DXGI_COLOR_SPACE_TYPE space);
+    void CommitScreenCapture(DlssNr::PipelineCaptureFrame* job, ID3D12Fence* fence, UINT64 value,
+                             ID3D12CommandAllocator* allocator = nullptr, ID3D12GraphicsCommandList* list = nullptr);
+    void CaptureFinalScreen(ID3D12Resource* color, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space);
+    void CollectScreenCaptures();
 
     unsigned long long frames = 0;
 
