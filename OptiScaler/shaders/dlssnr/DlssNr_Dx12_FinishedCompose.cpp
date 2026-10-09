@@ -34,6 +34,13 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         DlssNr::ResolvePlacement(cfg.DlssNrRunBeforeSr.value_or_default(), cfg.DlssNrDeferredDlss.value_or_default(),
                                  cfg.DlssNrResidualAcrossRr.value_or_default(), true)
             .deferred;
+    // Without frame generation the producer's signal was queued before this presentation and cannot depend on it,
+    // so the presentation queue waits for it on the GPU instead of skipping the frame. Skipping left most frames
+    // without NR whenever DLSS ran on another queue (Expedition 33: NR on about one present in five, a history reset
+    // on every skip, and uneven frame times).
+    const bool gpuWait = !gameFrameHandoff && !(::State::Instance().currentFG &&
+                                                ::State::Instance().currentFG->IsActive() &&
+                                                !::State::Instance().currentFG->IsPaused());
     for (auto& slot : late.slots)
     {
         if (!slot.pending || !slot.submitted)
@@ -45,9 +52,10 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
             late.reset = true;
             continue;
         }
-        // A queued producer signal can depend on this presentation, regardless of FG provider.
-        if (!DlssNr::FinishedInputReady(slot.producerQueue.Get() == realQueue, slot.fence->GetCompletedValue(),
-                                        slot.ready))
+        // With frame generation a queued producer signal can depend on this presentation.
+        const auto completed = slot.fence->GetCompletedValue();
+        if (!DlssNr::FinishedInputReady(slot.producerQueue.Get() == realQueue || (gpuWait && completed != UINT64_MAX),
+                                        completed, slot.ready))
             continue;
         if (slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width &&
             slot.frame.OutputHeight == desc.Height && (!latest || slot.serial > latest->serial))
@@ -305,6 +313,13 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         late.Say("Could not finish the picture. Restart the game to retry.");
         slot.pending = true; // quarantine the slot; do not reuse possibly recorded NR resources
         slot.submitted = false;
+        return false;
+    }
+    // The producer's copy may still be running on another queue; order this work after it on the GPU.
+    if (slot.producerQueue.Get() != realQueue && slot.fence->GetCompletedValue() < slot.ready &&
+        FAILED(queue->Wait(slot.fence.Get(), slot.ready)))
+    {
+        late.Say("The graphics queue stopped. Restart the game to retry.");
         return false;
     }
     ID3D12CommandList* lists[] = { cmd };
