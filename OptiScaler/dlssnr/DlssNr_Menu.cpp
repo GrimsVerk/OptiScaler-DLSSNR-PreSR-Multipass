@@ -206,6 +206,17 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::SetTooltip(
                 "Keep the game's SR/RR input clean and upscale only the NR edit with a separate non-RR backend."
                 "\nApply after upscale, or at presentation when finished-picture mode is enabled.");
+
+        if (finished)
+        {
+            bool diagnostics = config->DlssNrFinishedDiagnostics.value_or_default();
+            if (ImGui::Checkbox("Finished-picture diagnostics (log)", &diagnostics))
+                config->DlssNrFinishedDiagnostics = diagnostics;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Native Vulkan only. Logs, once each, why a frame was not processed, and a count of "
+                                  "outcomes every 600 frames.\nChanges no behaviour; leave it off when not "
+                                  "troubleshooting.");
+        }
         ImGui::Spacing();
 
         // Denoise first. Written for people who did not design it: what it does, what it costs, what each knob is.

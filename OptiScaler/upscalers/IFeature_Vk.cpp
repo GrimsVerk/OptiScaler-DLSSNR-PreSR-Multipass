@@ -4,6 +4,7 @@
 #include "State.h"
 #include "nvsdk_ngx_vk.h"
 #include <dlssnr/DlssNrPipeline_Vk.h>
+#include <dlssnr/DlssNrFinished_Vk.h>
 
 IFeature_Vk::~IFeature_Vk()
 {
@@ -131,6 +132,9 @@ bool IFeature_Vk::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InP
     nrFrame.MotionVectorsLowResolution = LowResMV();
     if (finishedNr && NeuralRendering && !IsWithDx12())
         NeuralRendering->CaptureFinished(InCmdBuffer, nrDepth, nrMotion, nrFrame, Instance);
+    else if (finishedNr)
+        DlssNr::FinishedVkDiagnostic(NeuralRendering ? "evaluate: game upscaler runs through the DX12 bridge"
+                                                     : "evaluate: no NR instance");
     // Keep the current per-evaluate subrect. The feature's cached render size may be last frame's.
 
     if (useNr && !nrBeforeUpscale && !denoiseFirst)

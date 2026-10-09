@@ -259,6 +259,7 @@ class Config
     CustomOptional<bool> DlssNrEnabled { false };
     CustomOptional<bool> DlssNrRunBeforeSr { false };
     CustomOptional<bool> DlssNrFinishedPicture { false };
+    CustomOptional<bool> DlssNrFinishedDiagnostics { false };
     // Fit the scene-to-finished HDR response for early residuals.
     CustomOptional<bool> DlssNrHdrTransfer { false };
     // Generate before SR, privately upscale the edit, then compose after SR.

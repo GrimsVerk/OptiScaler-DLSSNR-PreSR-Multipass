@@ -346,7 +346,10 @@ void DlssNr_Vk::CaptureFinished(VkCommandBuffer cmd, const VkImageInfo& depth, c
                                 const DlssNrFrameInfo_Vk& frame, VkInstance instance)
 {
     if (!CanRender())
+    {
+        DlssNr::FinishedVkDiagnostic("capture: NR pipeline cannot render");
         return;
+    }
     if (!_finished)
         _finished = std::make_unique<DlssNr::FinishedVk>(*this, _device, _physicalDevice);
     _finished->Capture(cmd, depth, motion, frame, instance);

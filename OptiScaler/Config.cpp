@@ -337,6 +337,7 @@ bool Config::Reload(std::filesystem::path iniPath)
                 nrBeforeSr = readBool("DlssNr", "BeforeUpscale");
             DlssNrRunBeforeSr.set_from_config(nrBeforeSr);
             DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
+            DlssNrFinishedDiagnostics.set_from_config(readBool("DlssNr", "FinishedDiagnostics"));
             DlssNrHdrTransfer.set_from_config(readBool("DlssNr", "HdrTransfer"));
             DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
             DlssNrPrivateUpscaler.set_from_config(readInt("DlssNr", "PrivateUpscaler"));
@@ -1274,6 +1275,8 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
         ini.SetValue("DlssNr", "FinishedPicture",
                      GetBoolValue(Instance()->DlssNrFinishedPicture.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "FinishedDiagnostics",
+                     GetBoolValue(Instance()->DlssNrFinishedDiagnostics.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HdrTransfer", GetBoolValue(Instance()->DlssNrHdrTransfer.value_for_config()).c_str());
         ini.SetValue("DlssNr", "RunBeforeSR", GetBoolValue(Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
         ini.SetValue("DlssNr", "DeferredDLSS", GetBoolValue(Instance()->DlssNrDeferredDlss.value_for_config()).c_str());

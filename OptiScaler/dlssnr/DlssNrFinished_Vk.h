@@ -26,4 +26,6 @@ void FinishedVkReset(VkCommandBuffer cmd);
 void FinishedVkResetPool(VkCommandPool pool);
 void FinishedVkPresent(VkQueue queue, VkPresentInfoKHR* present);
 std::string FinishedVkStatus();
+// Records a finished-picture diagnostic event when [DlssNr] FinishedDiagnostics is on.
+void FinishedVkDiagnostic(const char* key);
 } // namespace DlssNr

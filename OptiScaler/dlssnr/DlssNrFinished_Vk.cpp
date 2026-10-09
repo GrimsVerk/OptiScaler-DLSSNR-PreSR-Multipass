@@ -5,7 +5,10 @@
 #include <hooks/VulkanwDx12_Hooks.h>
 #include <algorithm>
 #include <array>
+#include <format>
+#include <map>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace DlssNr
@@ -26,6 +29,27 @@ struct Swapchain
 } screen;
 std::string status = "Waiting for a finished Vulkan picture.";
 uint64_t presentEpoch = 0;
+// Diagnostics ([DlssNr] FinishedDiagnostics): every early exit is counted, logged with its details the first
+// time it happens, and summarised every 600 presents. Behaviour does not change.
+std::map<std::string, uint64_t> diagCounts;
+bool DiagOn() { return Config::Instance()->DlssNrFinishedDiagnostics.value_or_default(); }
+void Diag(const std::string& key, const std::string& detail = {})
+{
+    if (!DiagOn())
+        return;
+    if (diagCounts[key]++ == 0)
+        LOG_INFO("DLSS-NR Vulkan finished picture diagnostic: {}{}{}", key, detail.empty() ? "" : " -- ", detail);
+}
+void DiagSummary()
+{
+    if (!DiagOn())
+        return;
+    std::string line;
+    for (const auto& [key, count] : diagCounts)
+        line += std::format("{}{}={}", line.empty() ? "" : ", ", key, count);
+    LOG_INFO("DLSS-NR Vulkan finished picture diagnostic summary after {} presents: {}", presentEpoch,
+             line.empty() ? "nothing recorded" : line);
+}
 void Say(const char* message)
 {
     if (status != message)
@@ -114,9 +138,11 @@ struct FinishedVk::Impl
     void Capture(VkCommandBuffer cmd, const VkImageInfo& depth, const VkImageInfo& motion,
                  const DlssNrFrameInfo_Vk& frame, VkInstance instance)
     {
+        Diag("capture: called");
         if (!Config::Instance()->DlssNrEnabled.value_or_default() ||
             !Config::Instance()->DlssNrFinishedPicture.value_or_default())
         {
+            Diag("capture: NR or finished picture off");
             for (auto& s : slots)
                 if (s.submitted)
                     s.pending = false;
@@ -124,6 +150,9 @@ struct FinishedVk::Impl
         }
         if (screen.device != device || !screen.handle)
         {
+            Diag("capture: no registered swapchain", std::format("screen device {} vs NR device {}, swapchain {}",
+                                                                 (void*) screen.device, (void*) device,
+                                                                 (void*) screen.handle));
             Say("Enable NR before creating the Vulkan swapchain; restart the game if NR was enabled during play.");
             return;
         }
@@ -136,6 +165,7 @@ struct FinishedVk::Impl
         }
         if (!depth.ImageView || !motion.ImageView)
         {
+            Diag("capture: no depth or motion view");
             Say("Waiting for Vulkan depth and movement data.");
             return;
         }
@@ -143,6 +173,8 @@ struct FinishedVk::Impl
         auto level = Vulkan_wDx12::cmdBufferStateTracker.GetCommandBufferLevel(cmd);
         if (!family || !level || *level != VK_COMMAND_BUFFER_LEVEL_PRIMARY)
         {
+            Diag("capture: command buffer not tracked or secondary",
+                 std::format("family {}, level {}", family ? (int) *family : -1, level ? (int) *level : -1));
             Say("Waiting for a tracked primary Vulkan command buffer.");
             return;
         }
@@ -160,10 +192,20 @@ struct FinishedVk::Impl
             }
         }
         if (!next)
+        {
+            std::string slotsState;
+            for (auto& sl : slots)
+                slotsState += std::format("[pending {} submitted {} epoch {}] ", sl.pending, sl.submitted, sl.epoch);
+            Diag("capture: no free slot", std::format("present epoch {}, {}", presentEpoch, slotsState));
             return;
+        }
         auto& s = *next;
         if (s.pool && s.family != *family)
+        {
+            Diag("capture: slot pool is for another queue family",
+                 std::format("slot family {}, command buffer family {}", s.family, *family));
             return;
+        }
         if (!s.pool)
         {
             VkCommandPoolCreateInfo pi { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -182,15 +224,28 @@ struct FinishedVk::Impl
             if (vkAllocateCommandBuffers(device, &ai, &s.cmd) != VK_SUCCESS ||
                 vkCreateFence(device, &fi, nullptr, &s.done) != VK_SUCCESS ||
                 vkCreateEvent(device, &ei, nullptr, &s.captured) != VK_SUCCESS)
+            {
+                Diag("capture: slot command buffer, fence or event creation failed");
                 return;
+            }
         }
         if (!s.cmd || !s.done || !s.captured)
+        {
+            Diag("capture: slot objects missing");
             return;
+        }
         if (!s.depth.Ensure(device, physical, depth.Width, depth.Height, VK_FORMAT_R32_SFLOAT) ||
             !s.motion.Ensure(device, physical, motion.Width, motion.Height, VK_FORMAT_R32G32_SFLOAT))
+        {
+            Diag("capture: depth/motion copy images could not be created",
+                 std::format("depth {}x{}, motion {}x{}", depth.Width, depth.Height, motion.Width, motion.Height));
             return;
+        }
         if (vkResetEvent(device, s.captured) != VK_SUCCESS)
+        {
+            Diag("capture: vkResetEvent failed");
             return;
+        }
         auto copy = [&](const VkImageInfo& source, ImageVk& dest, bool readWrite)
         {
             Transition(cmd, dest, VK_IMAGE_LAYOUT_GENERAL);
@@ -217,16 +272,34 @@ struct FinishedVk::Impl
         s.serial = ++serial;
         s.pending = true;
         s.submitted = false;
+        Diag(s.validCapture ? "capture: recorded" : "capture: recorded but the depth/motion copy failed",
+             std::format("output {}x{}, screen {}x{}, depth {}x{}, family {}", frame.OutputWidth, frame.OutputHeight,
+                         screen.size.width, screen.size.height, depth.Width, depth.Height, *family));
     }
     bool Present(VkQueue queue, VkPresentInfoKHR* present)
     {
+        Diag("present: called");
         if (!Config::Instance()->DlssNrEnabled.value_or_default() ||
-            !Config::Instance()->DlssNrFinishedPicture.value_or_default() || screen.device != device ||
-            present->swapchainCount != 1 || present->pSwapchains[0] != screen.handle)
+            !Config::Instance()->DlssNrFinishedPicture.value_or_default())
+        {
+            Diag("present: NR or finished picture off");
             return false;
+        }
+        if (screen.device != device || present->swapchainCount != 1 || present->pSwapchains[0] != screen.handle)
+        {
+            Diag("present: other device or swapchain",
+                 std::format("screen device {} vs NR device {}, {} swapchain(s), presented {} vs registered {}",
+                             (void*) screen.device, (void*) device, present->swapchainCount,
+                             present->swapchainCount ? (void*) present->pSwapchains[0] : nullptr,
+                             (void*) screen.handle));
+            return false;
+        }
         const uint32_t index = present->pImageIndices[0];
         if (index >= screen.images.size())
+        {
+            Diag("present: image index out of range", std::format("{} of {}", index, screen.images.size()));
             return false;
+        }
         Slot* latest = nullptr;
         for (auto& s : slots)
             if (s.pending && s.submitted && s.validCapture && s.queue == queue && s.epoch + 1 >= presentEpoch &&
@@ -234,11 +307,22 @@ struct FinishedVk::Impl
                 (!latest || s.serial > latest->serial))
                 latest = &s;
         if (!latest)
+        {
+            std::string slotsState;
+            for (auto& sl : slots)
+                slotsState += std::format("[pending {} submitted {} valid {} sameQueue {} epoch {} output {}x{}] ",
+                                          sl.pending, sl.submitted, sl.validCapture, sl.queue == queue, sl.epoch,
+                                          sl.frame.OutputWidth, sl.frame.OutputHeight);
+            Diag("present: no captured frame matches",
+                 std::format("present queue {}, epoch {}, screen {}x{}, {}", (void*) queue, presentEpoch,
+                             screen.size.width, screen.size.height, slotsState));
             return false;
+        }
         auto& s = *latest;
         if ((screen.usage & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) !=
             (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         {
+            Diag("present: swapchain lacks transfer usage", std::format("usage 0x{:x}", (unsigned) screen.usage));
             Say("The Vulkan swapchain does not support finished-picture transfers.");
             return false;
         }
@@ -248,6 +332,7 @@ struct FinishedVk::Impl
                           screen.format == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
         if (!pq && !scrgb && screen.space != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
         {
+            Diag("present: unsupported colour space", std::format("{}", (int) screen.space));
             Say("This Vulkan screen colour space is not supported.");
             return false;
         }
@@ -255,11 +340,17 @@ struct FinishedVk::Impl
         vkGetPhysicalDeviceFormatProperties(physical, screen.format, &props);
         if ((props.optimalTilingFeatures & (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) !=
             (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT))
+        {
+            Diag("present: screen format cannot be blitted", std::format("format {}", (int) screen.format));
             return false;
+        }
         if (swapchain != screen.handle)
         {
             if (vkDeviceWaitIdle(device) != VK_SUCCESS)
+            {
+                Diag("present: vkDeviceWaitIdle failed");
                 return false;
+            }
             for (auto semaphore : presentReady)
                 if (semaphore)
                     vkDestroySemaphore(device, semaphore, nullptr);
@@ -270,20 +361,32 @@ struct FinishedVk::Impl
         {
             VkSemaphoreCreateInfo ci { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
             if (vkCreateSemaphore(device, &ci, nullptr, &presentReady[index]) != VK_SUCCESS)
+            {
+                Diag("present: semaphore creation failed");
                 return false;
+            }
         }
         auto ensure = [&](ImageVk& image)
         {
             return image.Ensure(device, physical, screen.size.width, screen.size.height, VK_FORMAT_R16G16B16A16_SFLOAT);
         };
         if (!ensure(s.input) || !ensure(s.output) || (pq && (!ensure(s.linear) || !ensure(s.encoded))))
+        {
+            Diag("present: screen-size work images could not be created");
             return false;
+        }
         if (vkResetCommandPool(device, s.pool, 0) != VK_SUCCESS)
+        {
+            Diag("present: vkResetCommandPool failed");
             return false;
+        }
         VkCommandBufferBeginInfo bi { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(s.cmd, &bi) != VK_SUCCESS)
+        {
+            Diag("present: vkBeginCommandBuffer failed");
             return false;
+        }
         Transition(s.cmd, screen.images[index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(s.cmd, s.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         Blit(s.cmd, screen.images[index], s.input.info.Image, screen.size);
@@ -342,9 +445,15 @@ struct FinishedVk::Impl
             Transition(s.cmd, screen.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         if (vkEndCommandBuffer(s.cmd) != VK_SUCCESS)
+        {
+            Diag("present: vkEndCommandBuffer failed");
             return false;
+        }
         if (vkResetFences(device, 1, &s.done) != VK_SUCCESS)
+        {
+            Diag("present: vkResetFences failed");
             return false;
+        }
         std::vector<VkPipelineStageFlags> stages(present->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
         VkSubmitInfo submit { VK_STRUCTURE_TYPE_SUBMIT_INFO };
         submit.waitSemaphoreCount = present->waitSemaphoreCount;
@@ -364,6 +473,9 @@ struct FinishedVk::Impl
                 old.pending = false;
         present->waitSemaphoreCount = 1;
         present->pWaitSemaphores = &presentReady[index];
+        Diag(ran ? "present: NR applied" : "present: submitted without a model result",
+             std::format("colour ready {}, apply model {}", colorReady,
+                         Config::Instance()->DlssNrApplyModel.value_or_default()));
         Say(ran ? "Applying NR to the finished Vulkan picture." : "Preparing NR for the finished Vulkan picture.");
         if (ran && (++frames == 1 || frames % 300 == 0))
             LOG_INFO("DLSS-NR Vulkan finished picture: {} frames, {}x{}", frames, screen.size.width,
@@ -396,19 +508,26 @@ void FinishedVk::Submitted(VkQueue queue, VkCommandBuffer cmd)
         {
             s.submitted = true;
             s.queue = queue;
+            Diag("submit: capture's command buffer submitted", std::format("queue {}", (void*) queue));
         }
 }
 void FinishedVk::Reset(VkCommandBuffer cmd)
 {
     for (auto& s : impl->slots)
         if (s.pending && !s.submitted && s.producer == cmd)
+        {
             s.pending = false;
+            Diag("reset: capture dropped, its command buffer was reset before submission");
+        }
 }
 void FinishedVk::ResetPool(VkCommandPool pool)
 {
     for (auto& s : impl->slots)
         if (s.pending && !s.submitted && s.producerPool == pool)
+        {
             s.pending = false;
+            Diag("reset: capture dropped, its command pool was reset before submission");
+        }
 }
 bool FinishedVk::Present(VkQueue queue, VkPresentInfoKHR* present) { return impl->Present(queue, present); }
 void FinishedVkSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info)
@@ -458,10 +577,19 @@ void FinishedVkPresent(VkQueue queue, VkPresentInfoKHR* present)
     if (State::Instance().isShuttingDown)
         return;
     std::lock_guard lock(finishedMutex);
+    if (owners.empty())
+        Diag("present: no NR finished-picture owner exists yet");
     for (auto* owner : owners)
         if (owner->Present(queue, present))
             break;
     ++presentEpoch;
+    if (presentEpoch % 600 == 0)
+        DiagSummary();
+}
+void FinishedVkDiagnostic(const char* key)
+{
+    std::lock_guard lock(finishedMutex);
+    Diag(key);
 }
 std::string FinishedVkStatus()
 {
