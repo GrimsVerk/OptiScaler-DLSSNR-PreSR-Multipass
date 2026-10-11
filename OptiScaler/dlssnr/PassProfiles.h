@@ -29,8 +29,10 @@ inline ModelSettings PassSettings(const Config& cfg, unsigned int pass)
     }
     result.preset = std::min(result.preset, 3u);
     result.style = std::min(result.style, 2u);
-    const auto bounded = [](float value, float fallback, float minimum)
-    { return std::isfinite(value) ? std::clamp(value, minimum, 2.0f) : fallback; };
+    // Unlocked: any finite value goes to the model as entered; locked: the usual 0..2 (skin -1..2).
+    const bool unlocked = cfg.DlssNrUnlockStrengths.value_or_default();
+    const auto bounded = [unlocked](float value, float fallback, float minimum)
+    { return std::isfinite(value) ? (unlocked ? value : std::clamp(value, minimum, 2.0f)) : fallback; };
     result.intensity = bounded(result.intensity, 1.0f, 0.0f);
     result.localStructure = bounded(result.localStructure, 1.0f, 0.0f);
     result.localTone = bounded(result.localTone, pass == 0 ? 1.0f : 0.0f, 0.0f);

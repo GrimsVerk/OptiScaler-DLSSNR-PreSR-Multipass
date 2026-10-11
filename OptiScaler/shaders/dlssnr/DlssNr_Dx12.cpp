@@ -9,6 +9,7 @@
 #include "precompile/dlssnr_spatial_Shader.h"
 #include "precompile/dlssnr_spatial_guides_Shader.h"
 #include "precompile/dlssnr_denoise_first_Shader.h"
+#include "precompile/dlssnr_hudless_temporal_Shader.h"
 
 namespace
 {
@@ -325,6 +326,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
         heap.ReleaseHeaps();
     if (_finishedColorPipelineState)
         _finishedColorPipelineState->Release();
+    if (_hudlessTemporalPipelineState)
+        _hudlessTemporalPipelineState->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -448,6 +451,24 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::
     auto* pipeline = constants.mode == 101 ? _spatialGuidesPipelineState : _spatialPipelineState;
     return DispatchCompute(cmd, bytes, pipeline, source, depthOrAnswer, motion, nullptr, nullptr, target, secondary,
                            nullptr);
+}
+
+bool DlssNr_Dx12::DispatchHudlessTemporal(ID3D12GraphicsCommandList* cmd,
+                                          const DlssNr::HudlessTemporal::Constants& constants, ID3D12Resource* nr,
+                                          ID3D12Resource* input, ID3D12Resource* history, ID3D12Resource* motion,
+                                          ID3D12Resource* previousInput, ID3D12Resource* historyOut,
+                                          ID3D12Resource* output)
+{
+    static_assert(sizeof(DlssNr::HudlessTemporal::Constants) == sizeof(DlssNrConstants));
+    DlssNrConstants bytes {};
+    std::memcpy(&bytes, &constants, sizeof(bytes));
+    std::lock_guard ownersLock(nrOwnersMutex);
+    std::lock_guard stateLock(_state->mutex);
+    if (!_hudlessTemporalPipelineState && _init)
+        CreateComputePipeline(_device, &_hudlessTemporalPipelineState, dlssnr_hudless_temporal_cso,
+                              sizeof(dlssnr_hudless_temporal_cso), nullptr);
+    return DispatchCompute(cmd, bytes, _hudlessTemporalPipelineState, nr, input, history, motion, previousInput,
+                           historyOut, output, nullptr);
 }
 
 bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
@@ -867,7 +888,14 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
     if (swapchain && queue && config.DlssNrEnabled.value_or_default() &&
         (config.DlssNrFinishedPicture.value_or_default() || screenCapture))
     {
-        if (StreamlinePicture::RenderQueue(swapchain) || FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&chain))) ||
+        if (StreamlinePicture::RenderQueue(swapchain))
+        {
+            // The frame generation handoff applies NR to this picture; let it take the capture.
+            if (armScreenCapture)
+                dlssNrStreamlineCaptureRequest = true;
+            return;
+        }
+        if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&chain))) ||
             FAILED(chain->GetBuffer(chain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&picture))))
             return;
         space = ReadFinishedSpace(swapchain, picture.Get());
@@ -883,9 +911,10 @@ void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture
     if (!swapchain || !picture || !queue)
         return;
     const auto space = ReadFinishedSpace(swapchain, picture);
+    const bool armScreenCapture = dlssNrStreamlineCaptureRequest.exchange(false);
     std::lock_guard lock(nrOwnersMutex);
     if (activeNrOwner)
-        activeNrOwner->ApplyFinished(picture, queue, space, true);
+        activeNrOwner->ApplyFinished(picture, queue, space, true, armScreenCapture);
 }
 void ApplyToFinishedPictureDx11(IDXGISwapChain* swapchain)
 {

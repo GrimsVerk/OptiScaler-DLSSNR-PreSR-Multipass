@@ -42,6 +42,8 @@
 
 // Set while a Ctrl+F8 screen capture still has presents to record; read by the present hook before NR locks.
 inline std::atomic_bool dlssNrScreenCaptureArmed { false };
+// Ctrl+F8 seen on the swapchain present while the frame generation handoff owns the finished picture.
+inline std::atomic_bool dlssNrStreamlineCaptureRequest { false };
 #include <cstring>
 #include "DlssNr_ResidualPair.h"
 #include "../output_scaling/OS_Dx12.h"
@@ -451,6 +453,17 @@ struct DlssNr_Dx12::State
         Slot* heldSlot = nullptr;
         uint64_t heldSlotSerial = 0;
         uint64_t serial = 0, successes = 0;
+        // HUD-less finished picture: one work copy of the game's HUD-less picture and one composed picture, reused
+        // every frame (all of it runs in order on the game's render queue).
+        ComPtr<ID3D12Resource> hudlessWork, hudlessComposite;
+        // Motion-adaptive strength / smoothing: the adjusted HUD-less picture and two smoothed-change histories
+        // (signed float). Histories rest in NON_PIXEL_SHADER_RESOURCE between frames, the output in UAV.
+        ComPtr<ID3D12Resource> hudlessOut, hudlessHistory[2], hudlessPrevInput;
+        unsigned hudlessHistoryIndex = 0;
+        bool hudlessHistoryValid = false;
+        uint64_t hudlessSerial = 0, hudlessFrames = 0, hudlessWindow = 0;
+        bool hudlessSeen = false;
+        double hudlessCpuMs = 0.0, hudlessCpuMaxMs = 0.0;
         std::string status = "Waiting for a finished picture.";
         bool reset = true;
         std::atomic<bool> tracking { false };

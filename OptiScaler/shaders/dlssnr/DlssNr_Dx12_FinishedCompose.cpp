@@ -1,5 +1,8 @@
 #include "pch.h"
 #include "DlssNr_Dx12_State.h"
+#include <dlssnr/DlssNr_Hudless.h>
+#include <dlssnr/DlssNr_HudlessTest.h>
+#include <chrono>
 #include <thread>
 
 auto DlssNr_Dx12::State::ArmScreenCapture() -> void
@@ -161,6 +164,53 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         DlssNr::ResolvePlacement(cfg.DlssNrRunBeforeSr.value_or_default(), cfg.DlssNrDeferredDlss.value_or_default(),
                                  cfg.DlssNrResidualAcrossRr.value_or_default(), true)
             .deferred;
+    // HUD-less finished picture: only at the frame generation handoff, where the game's HUD-less picture and UI
+    // mask are tagged for this frame. Without one, the ordinary finished picture runs, unless the game has provided
+    // them before: then the frame is left untouched rather than switching to NR over the HUD.
+    const auto cpuStart = std::chrono::steady_clock::now();
+    DlssNr::Hudless::Frame hudless;
+    ID3D12Resource* hudlessMask = nullptr;
+    bool useHudless = false;
+    if (gameFrameHandoff && cfg.DlssNrFinishedHudless.value_or_default() && !residualOnly && sdr)
+    {
+        DlssNr::HudlessTest::Harness::Get().Poll();
+        if (DlssNr::Hudless::Take(hudless, late.hudlessSerial))
+        {
+            late.hudlessSeen = true;
+            const auto hd = hudless.color.resource->GetDesc();
+            if (hd.Width == desc.Width && hd.Height == desc.Height && hd.SampleDesc.Count == 1)
+            {
+                auto ensure = [&](LateContext::ComPtr<ID3D12Resource>& resource, DXGI_FORMAT format)
+                {
+                    if (resource && (resource->GetDesc().Width != desc.Width ||
+                                     resource->GetDesc().Height != desc.Height || resource->GetDesc().Format != format))
+                        resource.Reset();
+                    if (!resource)
+                        resource.Attach(CreateScratch(late.device.Get(), format, (unsigned) desc.Width, desc.Height));
+                    return resource != nullptr;
+                };
+                useHudless = ensure(late.hudlessWork, hd.Format) && ensure(late.hudlessComposite, desc.Format);
+                if (hudless.mask.resource)
+                {
+                    const auto md = hudless.mask.resource->GetDesc();
+                    if (md.Width == desc.Width && md.Height == desc.Height && md.SampleDesc.Count == 1)
+                        hudlessMask = hudless.mask.resource.Get();
+                }
+            }
+            if (!useHudless)
+            {
+                late.Say("The game's HUD-less picture does not match the screen; nothing applied.");
+                late.hudlessHistoryValid = false;
+                return false;
+            }
+        }
+        else if (late.hudlessSeen)
+        {
+            late.Say("Waiting for the game's HUD-less picture.");
+            late.hudlessHistoryValid = false;
+            return false;
+        }
+    }
     // Without frame generation the producer's signal was queued before this presentation and cannot depend on it,
     // so the presentation queue waits for it on the GPU instead of skipping the frame. Skipping left most frames
     // without NR whenever DLSS ran on another queue (Expedition 33: NR on about one present in five, a history reset
@@ -272,6 +322,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     const auto before = nr.successfulDispatches;
     bool appliedResidual = false;
     bool matchedResponse = false;
+    bool hudlessApplied = false;
+    bool hudlessRecorded = false;
     if (slot.residualOnly)
     {
         if (slot.encoded &&
@@ -380,8 +432,187 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         frame.SubmissionEpoch = epoch;
         Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (useHudless)
+        {
+            // NR on a copy of the game's HUD-less picture (tone mapped, before the HUD). Its change goes into the
+            // presented picture outside the UI mask, and the NR'd copy replaces the HUD-less picture, so frame
+            // generation interpolates the same image the real frame shows. All of it is recorded here and runs on
+            // the game's render queue ahead of the frame generation present: no CPU wait, no extra queue.
+            auto* source = hudless.color.resource.Get();
+            const auto sourceState = hudless.color.state;
+            auto* work = late.hudlessWork.Get();
+            auto* composite = late.hudlessComposite.Get();
+            const auto readable = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            Barrier(cmd, source, sourceState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            Barrier(cmd, work, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+            cmd->CopyResource(work, source);
+            Barrier(cmd, work, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceState);
+            frame.OutputArrivalState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            Run(cmd, work, slot.depth.Get(), slot.motion.Get(), work, frame, queue);
+            if (nr.successfulDispatches > before && Config::Instance()->DlssNrApplyModel.value_or_default())
+            {
+                Barrier(cmd, work, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
+                Barrier(cmd, source, sourceState, readable);
+                // Motion-adaptive strength and smoothing adjust NR's change in one pass into hudlessOut; without
+                // them the NR output is used as it is.
+                const auto temporalSettings = DlssNr::HudlessTemporal::ReadSettings(cfg);
+                ID3D12Resource* edited = work;
+                DlssNr::HudlessTemporal::Constants temporal {};
+                const auto& f = slot.frame;
+                const auto motionDesc = slot.motion->GetDesc();
+                const auto guide = DlssNr::GuideSubrect(
+                    { unsigned(motionDesc.Width), motionDesc.Height },
+                    f.MotionVectorsLowResolution ? DlssNr::GuideExtent { f.RenderSubrectWidth, f.RenderSubrectHeight }
+                                                 : DlssNr::GuideExtent { unsigned(desc.Width), desc.Height },
+                    f.MotionSubrectBaseX, f.MotionSubrectBaseY);
+                if (temporalSettings.Active())
+                {
+                    auto ensureTexture = [&](LateContext::ComPtr<ID3D12Resource>& resource, DXGI_FORMAT format,
+                                             bool readableAtRest)
+                    {
+                        if (resource && (resource->GetDesc().Width != desc.Width ||
+                                         resource->GetDesc().Height != desc.Height ||
+                                         resource->GetDesc().Format != format))
+                            resource.Reset();
+                        if (!resource)
+                        {
+                            resource.Attach(
+                                CreateScratch(late.device.Get(), format, (unsigned) desc.Width, desc.Height));
+                            if (resource && readableAtRest)
+                                Barrier(cmd, resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
+                            late.hudlessHistoryValid = false;
+                        }
+                        return resource != nullptr;
+                    };
+                    const auto hudlessFormat = work->GetDesc().Format;
+                    if (guide.valid() && ensureTexture(late.hudlessOut, hudlessFormat, false) &&
+                        ensureTexture(late.hudlessHistory[0], DXGI_FORMAT_R16G16B16A16_FLOAT, true) &&
+                        ensureTexture(late.hudlessHistory[1], DXGI_FORMAT_R16G16B16A16_FLOAT, true) &&
+                        ensureTexture(late.hudlessPrevInput, hudlessFormat, true))
+                    {
+                        temporal.width = (unsigned) desc.Width;
+                        temporal.height = desc.Height;
+                        temporal.guideX = guide.x;
+                        temporal.guideY = guide.y;
+                        temporal.guideWidth = guide.width;
+                        temporal.guideHeight = guide.height;
+                        temporal.mvToOutX = f.MvScaleX * float(desc.Width) / float(guide.width);
+                        temporal.mvToOutY = f.MvScaleY * float(desc.Height) / float(guide.height);
+                        temporal.smoothing = temporalSettings.smoothing ? 1u : 0u;
+                        temporal.historyValid =
+                            late.hudlessHistoryValid && temporalSettings.smoothing && !f.Reset && !late.reset;
+                        temporal.currentWeight = 1.0f / temporalSettings.frames;
+                        temporal.tolerance = temporalSettings.tolerance;
+                        temporal.adaptive = temporalSettings.adaptive ? 1u : 0u;
+                        temporal.stillStrength = temporalSettings.stillStrength;
+                        temporal.motionStrength = temporalSettings.motionStrength;
+                        temporal.motionStart = temporalSettings.motionStart;
+                        temporal.motionFull = temporalSettings.motionFull;
+                        temporal.debugView = (unsigned) temporalSettings.debugView;
+                        temporal.reject = temporalSettings.reject;
+                        temporal.bandSplit = temporalSettings.bandSplit ? 1u : 0u;
+                        const unsigned next = late.hudlessHistoryIndex ^ 1u;
+                        auto* historyIn = late.hudlessHistory[late.hudlessHistoryIndex].Get();
+                        auto* historyOut = late.hudlessHistory[next].Get();
+                        Barrier(cmd, historyOut, readable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        const bool adjusted = shader.DispatchHudlessTemporal(
+                            cmd, temporal, work, source, historyIn, slot.motion.Get(), late.hudlessPrevInput.Get(),
+                            historyOut, late.hudlessOut.Get());
+                        Barrier(cmd, historyOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
+                        // This frame's input becomes the next frame's previous picture (for history rejection).
+                        Barrier(cmd, late.hudlessPrevInput.Get(), readable, D3D12_RESOURCE_STATE_COPY_DEST);
+                        Barrier(cmd, source, readable, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        cmd->CopyResource(late.hudlessPrevInput.Get(), source);
+                        Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_SOURCE, readable);
+                        Barrier(cmd, late.hudlessPrevInput.Get(), D3D12_RESOURCE_STATE_COPY_DEST, readable);
+                        if (adjusted)
+                        {
+                            Barrier(cmd, late.hudlessOut.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
+                            edited = late.hudlessOut.Get();
+                            late.hudlessHistoryIndex = next;
+                            late.hudlessHistoryValid = temporalSettings.smoothing;
+                        }
+                        else
+                            late.hudlessHistoryValid = false;
+                    }
+                    else
+                        late.hudlessHistoryValid = false;
+                }
+                else
+                    late.hudlessHistoryValid = false;
+                if (hudlessMask)
+                    Barrier(cmd, hudlessMask, hudless.mask.state, readable);
+                Barrier(cmd, color, D3D12_RESOURCE_STATE_PRESENT, readable);
+                DlssNrConstants blend {};
+                blend.Mode = 10;
+                blend.Width = (unsigned) desc.Width;
+                blend.Height = desc.Height;
+                blend.DebugView = hudlessMask ? (hudless.maskInAlpha ? 2u : 1u) : 0u;
+                hudlessApplied = shader.DispatchResidualPass(cmd, blend, color, edited, source,
+                                                             hudlessMask ? hudlessMask : source, composite, true);
+                if (hudlessApplied)
+                {
+                    Barrier(cmd, composite, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmd, color, readable, D3D12_RESOURCE_STATE_COPY_DEST);
+                    cmd->CopyResource(color, composite);
+                    Barrier(cmd, color, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+                    Barrier(cmd, composite, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    auto& harness = DlssNr::HudlessTest::Harness::Get();
+                    if (harness.Recording())
+                    {
+                        DlssNr::HudlessTest::FrameInfo info;
+                        info.gameFrame = epoch;
+                        info.milliseconds = std::chrono::duration<double, std::milli>(
+                                                std::chrono::steady_clock::now().time_since_epoch())
+                                                .count();
+                        info.mvScaleX = f.MvScaleX;
+                        info.mvScaleY = f.MvScaleY;
+                        info.outputWidth = (unsigned) desc.Width;
+                        info.outputHeight = desc.Height;
+                        info.guideX = guide.x;
+                        info.guideY = guide.y;
+                        info.guideWidth = guide.width;
+                        info.guideHeight = guide.height;
+                        info.reset = f.Reset || late.reset;
+                        info.historyValid = temporal.historyValid;
+                        info.temporal = edited != work;
+                        info.adaptive = temporal.adaptive;
+                        info.smoothing = temporal.smoothing;
+                        info.stillStrength = temporal.stillStrength;
+                        info.motionStrength = temporal.motionStrength;
+                        info.motionStart = temporal.motionStart;
+                        info.motionFull = temporal.motionFull;
+                        info.frames = temporal.currentWeight > 0 ? 1.0f / temporal.currentWeight : 0.0f;
+                        info.tolerance = temporal.tolerance;
+                        info.reject = temporal.reject;
+                        info.bandSplit = temporal.bandSplit;
+                        hudlessRecorded = harness.Record(cmd, late.device.Get(), { source, readable }, { work, readable },
+                                                         { edited, readable }, { slot.motion.Get(), readable }, info);
+                    }
+                    Barrier(cmd, edited, readable, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmd, source, readable, D3D12_RESOURCE_STATE_COPY_DEST);
+                    cmd->CopyResource(source, edited);
+                    Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_DEST, sourceState);
+                    Barrier(cmd, edited, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+                else
+                {
+                    Barrier(cmd, color, readable, D3D12_RESOURCE_STATE_PRESENT);
+                    Barrier(cmd, source, readable, sourceState);
+                    Barrier(cmd, edited, readable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    late.hudlessHistoryValid = false;
+                }
+                if (edited != work)
+                    Barrier(cmd, work, readable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                if (hudlessMask)
+                    Barrier(cmd, hudlessMask, readable, hudless.mask.state);
+            }
+            else
+                late.hudlessHistoryValid = false;
+        }
         ID3D12Resource* nrColor = color;
-        bool colorReady = true;
+        bool colorReady = !useHudless;
         DlssNrConstants conversion {};
         conversion.Width = (unsigned) desc.Width;
         conversion.Height = desc.Height;
@@ -438,6 +669,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     if (screenJob)
     {
         screenJob->metadata << "nr_ran " << (slot.residualOnly ? appliedResidual : nr.successfulDispatches > before)
+                            << " hudless " << useHudless << " hudless_applied " << hudlessApplied << " ui_mask "
+                            << (hudlessMask ? (hudless.maskInAlpha ? "alpha" : "first_channel") : "none")
                             << " history_reset " << (slot.frame.Reset || late.reset) << '\n';
         screenJob->Copy(cmd, late.device.Get(), "screen_after_nr", color, D3D12_RESOURCE_STATE_PRESENT);
         screenJob->End(cmd);
@@ -470,6 +703,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     }
     if (screenJob)
         CommitScreenCapture(screenJob, slot.fence.Get(), slot.done);
+    if (hudlessRecorded)
+        DlssNr::HudlessTest::Harness::Get().Commit(slot.fence.Get(), slot.done);
     if (holdFinished)
     {
         late.heldFence = slot.fence;
@@ -480,7 +715,31 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     }
     const bool ran = slot.residualOnly ? appliedResidual : nr.successfulDispatches > before;
     late.reset = !ran;
+    if (useHudless)
+    {
+        // CPU cost of this present-time step (recording and submitting); the GPU work is NR itself plus copies.
+        const double cpuMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuStart).count();
+        late.hudlessCpuMs += cpuMs;
+        late.hudlessCpuMaxMs = std::max(late.hudlessCpuMaxMs, cpuMs);
+        ++late.hudlessWindow;
+        if (++late.hudlessFrames % 300 == 0 || late.hudlessFrames == 1)
+        {
+            LOG_INFO("DLSS-NR HUD-less finished picture: {} frames, applied {}, UI mask {}, CPU {:.3f} ms average "
+                     "{:.3f} ms max",
+                     late.hudlessFrames, hudlessApplied,
+                     hudlessMask ? (hudless.maskInAlpha ? "alpha" : "first channel") : "none (derived)",
+                     late.hudlessCpuMs / late.hudlessWindow, late.hudlessCpuMaxMs);
+            late.hudlessWindow = 0;
+            late.hudlessCpuMs = 0.0;
+            late.hudlessCpuMaxMs = 0.0;
+        }
+    }
     late.Say(!Config::Instance()->DlssNrApplyModel.value_or_default() ? "NR changes are hidden."
+             : useHudless ? (hudlessApplied ? (hudlessMask ? "Applying NR to the HUD-less picture; HUD kept."
+                                                           : "Applying NR to the HUD-less picture; HUD found by "
+                                                             "comparison (the game gave no UI mask).")
+                                            : "Preparing NR for the HUD-less picture.")
              : ran                                                    ? (slot.residualOnly
                                                                              ? (matchedResponse
                                                                                     ? "Applying pre-SR changes with HDR brightness matching (local fallback enabled)."

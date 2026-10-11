@@ -207,6 +207,116 @@ void RenderMenu(Config* config, float menuResScale)
                 "Keep the game's SR/RR input clean and upscale only the NR edit with a separate non-RR backend."
                 "\nApply after upscale, or at presentation when finished-picture mode is enabled.");
 
+        bool hudless = finished && config->DlssNrFinishedHudless.value_or_default();
+        if (PipelineUi::CheckboxWrapped("Apply NR to the finished picture without the HUD", &hudless, toggleWidth))
+        {
+            config->DlssNrFinishedHudless = hudless;
+            if (hudless)
+            {
+                // Runs NR itself on the HUD-less picture: the finished picture on, the separate-edit route off.
+                config->DlssNrFinishedPicture = true;
+                config->DlssNrRunBeforeSr = false;
+                config->DlssNrDeferredDlss = false;
+                config->DlssNrResidualAcrossRr = false;
+                finished = true;
+            }
+            DlssNr::RetryAfterFailure();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(
+                "For games with DLSS frame generation through Streamline that give it a picture without the HUD\n"
+                "(tone mapped, before the HUD is drawn) and a UI mask. NR runs on that picture just before frame\n"
+                "generation; its change goes into the shown picture only where there is no HUD, and frame\n"
+                "generation gets the NR picture too, so generated frames match. Adds only NR's own GPU time: no\n"
+                "CPU wait, nothing extra for Reflex to account for.\n"
+                "Ticking it also turns on the finished picture and turns off generating before upscale.\n"
+                "Needs SDR output. Games without such a picture use the ordinary finished picture.");
+
+        if (finished && config->DlssNrFinishedHudless.value_or_default())
+        {
+            ImGui::Indent();
+            bool adaptive = config->DlssNrHudlessMotionAdaptive.value_or_default();
+            if (PipelineUi::CheckboxWrapped("Motion-adaptive NR strength", &adaptive, toggleWidth))
+                config->DlssNrHudlessMotionAdaptive = adaptive;
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Scales NR's change by how fast each pixel moves on screen, from the game's motion vectors:\n"
+                    "full 'still' strength below the start of the motion range, 'in motion' strength above its end,\n"
+                    "a smooth blend in between. Per pixel, so a moving character does not weaken NR on a still\n"
+                    "background. Costs one light pass (shared with smoothing).");
+            if (adaptive)
+            {
+                float motion = config->DlssNrHudlessMotionStrength.value_or_default() * 100.0f;
+                float still = config->DlssNrHudlessStillStrength.value_or_default() * 100.0f;
+                if (ImGui::DragFloatRange2("NR strength", &motion, &still, 0.5f, 0.0f, 100.0f, "In motion %.0f%%",
+                                           "Still %.0f%%", ImGuiSliderFlags_AlwaysClamp))
+                {
+                    config->DlssNrHudlessMotionStrength = motion / 100.0f;
+                    config->DlssNrHudlessStillStrength = still / 100.0f;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Left: strength while a pixel moves. Right: strength while it is still.\n"
+                                      "100%% is NR as set above.");
+                float start = config->DlssNrHudlessMotionStart.value_or_default();
+                float full = config->DlssNrHudlessMotionFull.value_or_default();
+                if (ImGui::DragFloatRange2("Motion range", &start, &full, 0.05f, 0.0f, 64.0f, "From %.2f px",
+                                           "To %.2f px/frame", ImGuiSliderFlags_AlwaysClamp))
+                {
+                    config->DlssNrHudlessMotionStart = start;
+                    config->DlssNrHudlessMotionFull = full;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("On-screen movement in output pixels per rendered frame. Below 'From' NR is at\n"
+                                      "still strength, above 'To' at motion strength.");
+            }
+
+            bool smoothing = config->DlssNrHudlessSmoothing.value_or_default();
+            if (PipelineUi::CheckboxWrapped("Temporal smoothing of NR's change", &smoothing, toggleWidth))
+                config->DlssNrHudlessSmoothing = smoothing;
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Averages NR's change (not the picture) over recent frames, following the game's motion\n"
+                    "vectors, to calm NR flicker and shimmer in motion. Where the previous change does not fit the\n"
+                    "current one (revealed areas, lighting changes) it is limited to the current range, so it does\n"
+                    "not smear. The game's own picture is never averaged.");
+            if (smoothing)
+            {
+                float frames = config->DlssNrHudlessSmoothingFrames.value_or_default();
+                if (ImGui::SliderFloat("Smoothing frames", &frames, 1.0f, 16.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp))
+                    config->DlssNrHudlessSmoothingFrames = frames;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("How many frames NR's change is averaged over. 1 = off. More = calmer, but\n"
+                                      "NR's detail follows motion more slowly.");
+                float tolerance = config->DlssNrHudlessSmoothingTolerance.value_or_default();
+                if (ImGui::SliderFloat("History tolerance", &tolerance, 0.0f, 8.0f, "%.2f",
+                                       ImGuiSliderFlags_AlwaysClamp))
+                    config->DlssNrHudlessSmoothingTolerance = tolerance;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("How far the previous change may differ from the current one, in local standard\n"
+                                      "deviations of the current change. Lower = less smearing, higher = calmer.");
+                bool detail = config->DlssNrHudlessSmoothingDetail.value_or_default();
+                if (ImGui::Checkbox("Keep fine detail sharp", &detail))
+                    config->DlssNrHudlessSmoothingDetail = detail;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Smooth only the coarse part of NR's change (tone and brightness shimmer, where\n"
+                                      "most of NR's flicker in motion is); fine detail always comes from the current frame.");
+                float reject = config->DlssNrHudlessSmoothingReject.value_or_default();
+                if (ImGui::SliderFloat("Reset where the picture changes", &reject, 0.0f, 0.2f, "%.3f",
+                                       ImGuiSliderFlags_AlwaysClamp))
+                    config->DlssNrHudlessSmoothingReject = reject;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Drops the history where the game's own picture changed under the motion (revealed\n"
+                                      "areas, moving lights). Lower = resets more often, 0 = off.");
+            }
+            ImGui::Unindent();
+        }
+
         if (finished)
         {
             bool diagnostics = config->DlssNrFinishedDiagnostics.value_or_default();
@@ -352,7 +462,10 @@ void RenderMenu(Config* config, float menuResScale)
         view.scalePercent = (int) lroundf(config->DlssNrWorkingScale.value_or_default() * 100.0f);
         view.rayReconstruction = rayReconstruction;
         if (finished)
+        {
             view.route = placement.deferred ? PipelineUi::Route::FinishedBefore : PipelineUi::Route::Finished;
+            view.hudless = !placement.deferred && config->DlssNrFinishedHudless.value_or_default();
+        }
         else if (placement.deferred)
             view.route = PipelineUi::Route::Deferred;
         else

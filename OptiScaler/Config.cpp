@@ -337,6 +337,19 @@ bool Config::Reload(std::filesystem::path iniPath)
                 nrBeforeSr = readBool("DlssNr", "BeforeUpscale");
             DlssNrRunBeforeSr.set_from_config(nrBeforeSr);
             DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
+            DlssNrFinishedHudless.set_from_config(readBool("DlssNr", "FinishedHudless"));
+            DlssNrHudlessMotionAdaptive.set_from_config(readBool("DlssNr", "HudlessMotionAdaptive"));
+            DlssNrHudlessStillStrength.set_from_config(readFloat("DlssNr", "HudlessStillStrength"));
+            DlssNrHudlessMotionStrength.set_from_config(readFloat("DlssNr", "HudlessMotionStrength"));
+            DlssNrHudlessMotionStart.set_from_config(readFloat("DlssNr", "HudlessMotionStart"));
+            DlssNrHudlessMotionFull.set_from_config(readFloat("DlssNr", "HudlessMotionFull"));
+            DlssNrHudlessSmoothing.set_from_config(readBool("DlssNr", "HudlessSmoothing"));
+            DlssNrHudlessSmoothingFrames.set_from_config(readFloat("DlssNr", "HudlessSmoothingFrames"));
+            DlssNrHudlessSmoothingTolerance.set_from_config(readFloat("DlssNr", "HudlessSmoothingTolerance"));
+            DlssNrHudlessSmoothingReject.set_from_config(readFloat("DlssNr", "HudlessSmoothingReject"));
+            DlssNrHudlessSmoothingDetail.set_from_config(readBool("DlssNr", "HudlessSmoothingDetail"));
+            DlssNrHudlessDebugView.set_from_config(readInt("DlssNr", "HudlessDebugView"));
+            DlssNrHudlessTestControl.set_from_config(readBool("DlssNr", "HudlessTestControl"));
             DlssNrFinishedDiagnostics.set_from_config(readBool("DlssNr", "FinishedDiagnostics"));
             DlssNrHdrTransfer.set_from_config(readBool("DlssNr", "HdrTransfer"));
             DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
@@ -407,6 +420,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrEnvironmentColour.set_from_config(readFloat("DlssNr", "EnvironmentColour"));
             DlssNrShowSkinMask.set_from_config(readBool("DlssNr", "ShowSkinMask"));
             DlssNrUnlockPasses.set_from_config(readBool("DlssNr", "UnlockPasses"));
+            DlssNrUnlockStrengths.set_from_config(readBool("DlssNr", "UnlockStrengths"));
             for (unsigned int i = 0; i < std::size(DlssNrPassOverrides); ++i)
             {
                 auto& pass = DlssNrPassOverrides[i];
@@ -513,6 +527,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             LogToNGX.set_from_config(readBool("Log", "LogToNGX"));
             OpenConsole.set_from_config(readBool("Log", "OpenConsole"));
             StreamlineDebug.set_from_config(readBool("Log", "StreamlineDebug"));
+            PipelineOrderTrace.set_from_config(readBool("Log", "PipelineOrderTrace"));
             DebugWait.set_from_config(readBool("Log", "DebugWait"));
             LogSingleFile.set_from_config(readBool("Log", "SingleFile"));
             LogAsync.set_from_config(readBool("Log", "LogAsync"));
@@ -1275,6 +1290,32 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
         ini.SetValue("DlssNr", "FinishedPicture",
                      GetBoolValue(Instance()->DlssNrFinishedPicture.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "FinishedHudless",
+                     GetBoolValue(Instance()->DlssNrFinishedHudless.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessMotionAdaptive",
+                     GetBoolValue(Instance()->DlssNrHudlessMotionAdaptive.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessStillStrength",
+                     GetFloatValue(Instance()->DlssNrHudlessStillStrength.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessMotionStrength",
+                     GetFloatValue(Instance()->DlssNrHudlessMotionStrength.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessMotionStart",
+                     GetFloatValue(Instance()->DlssNrHudlessMotionStart.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessMotionFull",
+                     GetFloatValue(Instance()->DlssNrHudlessMotionFull.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessSmoothing",
+                     GetBoolValue(Instance()->DlssNrHudlessSmoothing.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessSmoothingFrames",
+                     GetFloatValue(Instance()->DlssNrHudlessSmoothingFrames.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessSmoothingTolerance",
+                     GetFloatValue(Instance()->DlssNrHudlessSmoothingTolerance.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessSmoothingReject",
+                     GetFloatValue(Instance()->DlssNrHudlessSmoothingReject.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessSmoothingDetail",
+                     GetBoolValue(Instance()->DlssNrHudlessSmoothingDetail.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessDebugView",
+                     GetIntValue(Instance()->DlssNrHudlessDebugView.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessTestControl",
+                     GetBoolValue(Instance()->DlssNrHudlessTestControl.value_for_config()).c_str());
         ini.SetValue("DlssNr", "FinishedDiagnostics",
                      GetBoolValue(Instance()->DlssNrFinishedDiagnostics.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HdrTransfer", GetBoolValue(Instance()->DlssNrHdrTransfer.value_for_config()).c_str());
@@ -1394,6 +1435,8 @@ bool Config::SaveIni(std::filesystem::path destination)
                      GetFloatValue(Instance()->DlssNrEnvironmentColour.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ShowSkinMask", GetBoolValue(Instance()->DlssNrShowSkinMask.value_for_config()).c_str());
         ini.SetValue("DlssNr", "UnlockPasses", GetBoolValue(Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "UnlockStrengths",
+                     GetBoolValue(Instance()->DlssNrUnlockStrengths.value_for_config()).c_str());
         for (unsigned int i = 0; i < std::size(Instance()->DlssNrPassOverrides); ++i)
         {
             auto& pass = Instance()->DlssNrPassOverrides[i];
@@ -1708,6 +1751,8 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.SetValue("Log", "OpenConsole", GetBoolValue(Instance()->OpenConsole.value_for_config()).c_str());
         ini.SetValue("Log", "StreamlineDebug",
                      GetBoolValue(Instance()->StreamlineDebug.value_for_config()).c_str());
+        ini.SetValue("Log", "PipelineOrderTrace",
+                     GetBoolValue(Instance()->PipelineOrderTrace.value_for_config()).c_str());
         ini.SetValue("Log", "SingleFile", GetBoolValue(Instance()->LogSingleFile.value_for_config()).c_str());
         ini.SetValue("Log", "LogFileName",
                      wstring_to_string(Instance()->LogFileName.value_for_config_or(L"auto")).c_str());

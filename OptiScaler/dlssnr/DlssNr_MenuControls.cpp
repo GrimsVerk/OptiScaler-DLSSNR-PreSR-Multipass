@@ -241,8 +241,11 @@ void RenderInput(Config* config)
 
 // Model tuning rebuilds the feature; commit slider changes only on release.
 template <typename Option>
-static void DeferredSlider(const char* label, Option* opt, float mn, float mx, float def, bool inheritReset = false)
+static void DeferredSlider(const char* label, Option* opt, float mn, float mx, float def, bool inheritReset = false,
+                           bool unlocked = false)
 {
+    if (unlocked)
+        mx = 10.0f; // typed values (Ctrl+click) are kept as entered, outside the slider range too
     static std::unordered_map<ImGuiID, float> pending;
     const ImGuiID id = ImGui::GetID(label);
 
@@ -254,7 +257,10 @@ static void DeferredSlider(const char* label, Option* opt, float mn, float mx, f
 
     if (ImGui::IsItemDeactivatedAfterEdit())
     {
-        *opt = std::clamp(value, mn, mx);
+        if (!unlocked)
+            *opt = std::clamp(value, mn, mx);
+        else if (std::isfinite(value))
+            *opt = value;
         pending.erase(id);
     }
 
@@ -318,15 +324,24 @@ void RenderModel(Config* config)
     // Distinct widget IDs keep uncommitted slider edits with their selected pass.
     ImGui::PushID((int) selectedPass);
     const bool inherited = selectedPass != 0;
+    bool unlockStrengths = config->DlssNrUnlockStrengths.value_or_default();
+    if (ImGui::Checkbox("Unlock model input range", &unlockStrengths))
+        config->DlssNrUnlockStrengths = unlockStrengths;
+    HelpMarker("Intensity, Local structure, Local tone and Skin structure normally go 0 to 2.\n"
+               "Unlocked: the sliders go to 10, and a value typed with Ctrl+click is used as entered,\n"
+               "whatever the number. Values past 2 are outside what the model was tuned for.\n"
+               "Locking again limits the model to 0-2 without changing the saved values.");
     const auto tuning = [&](auto& intensity, auto& structure, auto& tone, auto& skin, auto& autoMask)
     {
         DeferredSlider("Intensity", &intensity, 0.0f, 2.0f,
-                       inherited ? config->DlssNrIntensity.value_or_default() : 1.0f, inherited);
+                       inherited ? config->DlssNrIntensity.value_or_default() : 1.0f, inherited, unlockStrengths);
         DeferredSlider("Local structure", &structure, 0.0f, 2.0f,
-                       inherited ? config->DlssNrLocalStructure.value_or_default() : 1.0f, inherited);
-        DeferredSlider("Local tone", &tone, 0.0f, 2.0f, inherited ? 0.0f : 1.0f, inherited);
+                       inherited ? config->DlssNrLocalStructure.value_or_default() : 1.0f, inherited,
+                       unlockStrengths);
+        DeferredSlider("Local tone", &tone, 0.0f, 2.0f, inherited ? 0.0f : 1.0f, inherited, unlockStrengths);
         DeferredSlider("Skin structure", &skin, -1.0f, 2.0f,
-                       inherited ? config->DlssNrSkinStructure.value_or_default() : -1.0f, inherited);
+                       inherited ? config->DlssNrSkinStructure.value_or_default() : -1.0f, inherited,
+                       unlockStrengths);
         bool mask = autoMask.value_or(inherited ? config->DlssNrAutoMask.value_or_default() : true);
         if (ImGui::Checkbox("Auto skin mask", &mask))
             autoMask = mask;

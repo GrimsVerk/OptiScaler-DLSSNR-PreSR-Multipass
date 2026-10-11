@@ -19,6 +19,7 @@
 
 #include "DlssNr_Common.h"
 #include "DlssNr_Spatial.h"
+#include "DlssNr_HudlessTemporal.h"
 #include <dlssnr/DlssNrFeature_Dx12.h>
 #include <memory>
 
@@ -63,6 +64,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // from the committed one). Null on backends/builds where the residual shader is absent.
     ID3D12PipelineState* _residualPipelineState = nullptr;
     ID3D12PipelineState* _finishedColorPipelineState = nullptr;
+    ID3D12PipelineState* _hudlessTemporalPipelineState = nullptr;
     ID3D12PipelineState* _spatialPipelineState = nullptr;
     ID3D12PipelineState* _spatialGuidesPipelineState = nullptr;
     // Denoise-first step 2: resample NR's edit by the jitter and put it onto the raw render.
@@ -157,6 +159,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                               ID3D12Resource* InSource, ID3D12Resource* InModel, ID3D12Resource* InOriginal,
                               ID3D12Resource* InMotion, ID3D12Resource* OutTarget, bool finishedColor = false);
 
+    // HUD-less finished picture: NR strength by motion and smoothing of NR's change, one pass.
+    bool DispatchHudlessTemporal(ID3D12GraphicsCommandList* cmd, const DlssNr::HudlessTemporal::Constants& constants,
+                                 ID3D12Resource* nr, ID3D12Resource* input, ID3D12Resource* history,
+                                 ID3D12Resource* motion, ID3D12Resource* previousInput, ID3D12Resource* historyOut,
+                                 ID3D12Resource* output);
     bool SpatialReady();
     bool DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
                          ID3D12Resource* source, ID3D12Resource* depthOrAnswer, ID3D12Resource* motion,

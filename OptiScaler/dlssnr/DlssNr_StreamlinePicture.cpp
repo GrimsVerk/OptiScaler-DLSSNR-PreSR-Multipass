@@ -5,6 +5,7 @@
 #include <State.h>
 #include <Util.h>
 #include <cstring>
+#include "DlssNr_HudlessTest.h"
 
 namespace DlssNr::StreamlinePicture
 {
@@ -49,6 +50,9 @@ template <bool Local> struct Hooks
         if (State::Instance().isShuttingDown)
             return;
         const auto& cfg = *Config::Instance();
+        // The test harness must hear "Enabled=1" while NR is off.
+        if (!skip && !(flags & DXGI_PRESENT_TEST))
+            DlssNr::HudlessTest::Harness::Get().Poll();
         if (skip || (flags & DXGI_PRESENT_TEST) || !cfg.DlssNrEnabled.value_or_default() ||
             !cfg.DlssNrFinishedPicture.value_or_default())
             return;

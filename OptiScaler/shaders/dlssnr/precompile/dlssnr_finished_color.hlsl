@@ -177,6 +177,27 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         0.6274039, 0.3292830, 0.0433131,
         0.0690973, 0.9195404, 0.0113623,
         0.0163914, 0.0880133, 0.8955953 };
+    if (mode == 10)
+    {
+        // HUD-less finished picture. t0 = the presented picture (with HUD), t1 = NR output of the game's HUD-less
+        // picture, t2 = that HUD-less picture before NR, t3 = the game's UI mask. NR's change is added only where
+        // no UI covers the scene. curveHistoryValid: 1 = mask in the first channel, 2 = mask in alpha, 0 = no mask
+        // (the UI is found where the presented picture differs from the HUD-less one).
+        float3 edited = reference.Load(int3(id.xy, 0)).rgb;
+        float3 base = original.Load(int3(id.xy, 0)).rgb;
+        float3 delta = edited - base;
+        if (!all(isfinite(delta)))
+            delta = 0.0;
+        float ui;
+        if (curveHistoryValid == 1)
+            ui = response.Load(int3(id.xy, 0)).r;
+        else if (curveHistoryValid == 2)
+            ui = response.Load(int3(id.xy, 0)).a;
+        else
+            ui = any(abs(pixel.rgb - base) > 2.0 / 255.0) ? 1.0 : 0.0;
+        target[id.xy] = float4(pixel.rgb + delta * (1.0 - saturate(ui)), pixel.a);
+        return;
+    }
     if (mode == 5)
     {
         // Carry a bounded relative change through DLSS. An absolute signed residual

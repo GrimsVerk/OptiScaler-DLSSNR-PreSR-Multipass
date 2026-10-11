@@ -31,6 +31,7 @@ struct View
     bool enabled = true;
     bool rayReconstruction = false;
     bool applyModel = true;
+    bool hudless = false; // finished picture taken from the game's HUD-less picture
     const char* privateUpscaler = "DLSS";
     unsigned int passes = 1;
     int scalePercent = 100;
@@ -117,12 +118,13 @@ inline void Draw(const View& view, Section& selected)
         { "Game input", "Placement / routing", (int) Section::Placement },
         { view.rayReconstruction ? "RR + Super Resolution" : "Super Resolution",
           split ? "Clean game image" : "Game upscaler" },
-        { "Game effects + HUD", "Game rendering" },
+        { view.hudless && finished ? "Game effects, no HUD" : "Game effects + HUD",
+          view.hudless && finished ? "Game's HUD-less picture" : "Game rendering" },
         { "Prepare NR input", "HDR / paper white / " + std::to_string(view.scalePercent) + "%", (int) Section::Input },
         { "NR model", std::to_string(view.passes) + (view.passes == 1 ? " pass" : " passes"), (int) Section::Model },
         { "Apply NR edit", view.applyModel ? "Strength / skin" : "Edit hidden; model runs", (int) Section::Blend },
         { "Upscale NR edit", std::string("Separate ") + view.privateUpscaler + " pass (no RR)" },
-        { "Game output", "FG / presentation" }
+        { "Game output", view.hudless && finished ? "HUD kept / FG / presentation" : "FG / presentation" }
     };
     // Parents encode the two branches directly; ordinary routes are simple ordered stages.
     struct Node

@@ -242,6 +242,7 @@ class Config
     CustomOptional<bool> LogToNGX { false };
     CustomOptional<bool> OpenConsole { false };
     CustomOptional<bool> StreamlineDebug { false };
+    CustomOptional<bool> PipelineOrderTrace { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
     CustomOptional<int> LogLevel { 0 };
     CustomOptional<std::wstring> LogFileName { L"OptiScaler.log" };
@@ -259,6 +260,20 @@ class Config
     CustomOptional<bool> DlssNrEnabled { false };
     CustomOptional<bool> DlssNrRunBeforeSr { false };
     CustomOptional<bool> DlssNrFinishedPicture { false };
+    CustomOptional<bool> DlssNrFinishedHudless { false };
+    // HUD-less finished picture: NR strength by on-screen motion, and temporal smoothing of NR's change.
+    CustomOptional<bool> DlssNrHudlessMotionAdaptive { false };
+    CustomOptional<float> DlssNrHudlessStillStrength { 1.0f };
+    CustomOptional<float> DlssNrHudlessMotionStrength { 0.9f };
+    CustomOptional<float> DlssNrHudlessMotionStart { 4.0f };
+    CustomOptional<float> DlssNrHudlessMotionFull { 16.0f };
+    CustomOptional<bool> DlssNrHudlessSmoothing { false };
+    CustomOptional<float> DlssNrHudlessSmoothingFrames { 12.0f };
+    CustomOptional<float> DlssNrHudlessSmoothingTolerance { 4.0f };
+    CustomOptional<float> DlssNrHudlessSmoothingReject { 0.03f };
+    CustomOptional<bool> DlssNrHudlessSmoothingDetail { true };
+    CustomOptional<int> DlssNrHudlessDebugView { 0 };
+    CustomOptional<bool> DlssNrHudlessTestControl { false }; // test harness: live settings + crop recorder
     CustomOptional<bool> DlssNrFinishedDiagnostics { false };
     // Fit the scene-to-finished HDR response for early residuals.
     CustomOptional<bool> DlssNrHdrTransfer { false };
@@ -310,6 +325,8 @@ class Config
     CustomOptional<float> DlssNrEnvironmentColour { 1.0f };
     CustomOptional<bool> DlssNrShowSkinMask { false };
     CustomOptional<bool> DlssNrUnlockPasses { false };
+    // Model inputs (intensity, local structure/tone, skin structure) beyond 0-2: sliders to 10, typed values kept.
+    CustomOptional<bool> DlssNrUnlockStrengths { false };
     // Passes 2..30 inherit pass 1, except LocalTone defaults to zero.
     struct NrPassOverrides
     {

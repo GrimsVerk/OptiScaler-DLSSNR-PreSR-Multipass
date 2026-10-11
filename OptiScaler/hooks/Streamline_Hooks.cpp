@@ -5,6 +5,7 @@
 #include <framegen/dlssg/MfgUnlock.h>
 #endif
 #include <dlssnr/DlssNr_StreamlinePicture.h>
+#include <dlssnr/DlssNr_Hudless.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -20,6 +21,7 @@
 #include <json.hpp>
 #include <sl1_reflex.h>
 #include <magic_enum.hpp>
+#include <hooks/PipelineOrderTrace.h>
 #include "detours/detours.h"
 #include <chrono>
 #include <thread>
@@ -392,6 +394,23 @@ sl::Result StreamlineHooks::hkslGetFeatureFunction(sl::Feature feature, const ch
     return o_slGetFeatureFunction(feature, functionName, function);
 }
 
+static void TraceTags(const char* api, uint32_t frame, const sl::ResourceTag* tags, uint32_t numTags, void* cmdBuffer)
+{
+    if (!PipelineOrderTrace::Active() || tags == nullptr)
+        return;
+
+    for (uint32_t i = 0; i < numTags; i++)
+    {
+        auto native = tags[i].resource != nullptr ? tags[i].resource->native : nullptr;
+        LOG_INFO("PipelineOrder: {} frame {} tag {} ({}) = {}, state 0x{:X}, lifecycle {}, extent {}x{}+{}+{}, cmd list {}",
+                 api, frame, magic_enum::enum_name((BufferType) tags[i].type), (uint32_t) tags[i].type,
+                 PipelineOrderTrace::Describe(native),
+                 tags[i].resource != nullptr ? tags[i].resource->state : 0, (int) tags[i].lifecycle,
+                 tags[i].extent.width, tags[i].extent.height, tags[i].extent.left, tags[i].extent.top,
+                 cmdBuffer != nullptr ? "yes" : "no");
+    }
+}
+
 sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
                                        uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
@@ -409,6 +428,13 @@ sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const
         LOG_WARN("Game trying to remove a tag");
         return o_slSetTag(viewport, tags, numTags, cmdBuffer);
     }
+
+    TraceTags("slSetTag", 0, tags, numTags, cmdBuffer);
+    DlssNr::Hudless::Record(tags, numTags);
+
+    // Tags are only acted on below for OptiScaler's own frame generation inputs (NR's HUD-less picture is above)
+    if (State::Instance().activeFgInput != FGInput::NvngxFG && State::Instance().activeFgInput != FGInput::DLSSG)
+        return o_slSetTag(viewport, tags, numTags, cmdBuffer);
 
     if (State::Instance().activeFgInput == FGInput::DLSSG &&
         State::Instance().gameQuirks[GameQuirk::IgnoreTagsWithoutHudlessForFG])
@@ -499,6 +525,13 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
 
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
 
+    TraceTags("slSetTagForFrame", (uint32_t) frame, resources, numResources, cmdBuffer);
+    DlssNr::Hudless::Record(resources, numResources);
+
+    // Tags are only acted on below for OptiScaler's own frame generation inputs
+    if (State::Instance().activeFgInput != FGInput::NvngxFG && State::Instance().activeFgInput != FGInput::DLSSG)
+        return o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
+
     if (State::Instance().activeFgInput == FGInput::DLSSG &&
         State::Instance().gameQuirks[GameQuirk::IgnoreTagsWithoutHudlessForFG])
     {
@@ -563,6 +596,20 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
                                                 sl::CommandBuffer* cmdBuffer)
 {
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
+
+    PipelineOrderTrace::OnEvaluate();
+
+    if (PipelineOrderTrace::Active())
+    {
+        LOG_INFO("PipelineOrder: slEvaluateFeature {} frame {} ({} inputs, thread {})", (uint32_t) feature,
+                 (uint32_t) frame, numInputs, GetCurrentThreadId());
+
+        for (uint32_t i = 0; inputs != nullptr && i < numInputs; i++)
+        {
+            if (inputs[i] != nullptr && inputs[i]->structType == sl::ResourceTag::s_structType)
+                TraceTags("slEvaluateFeature input", (uint32_t) frame, (const sl::ResourceTag*) inputs[i], 1, cmdBuffer);
+        }
+    }
 
     if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
     {
@@ -2028,7 +2075,8 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                     DetourAttach(&(PVOID&) o_slEvaluateFeature, hkslEvaluateFeature);
 
                 if (State::Instance().activeFgInput == FGInput::NvngxFG ||
-                    State::Instance().activeFgInput == FGInput::DLSSG)
+                    State::Instance().activeFgInput == FGInput::DLSSG || PipelineOrderTrace::Enabled() ||
+                    Config::Instance()->DlssNrEnabled.value_or_default())
                 {
                     if (o_slSetTag != nullptr)
                         DetourAttach(&(PVOID&) o_slSetTag, hkslSetTag);
