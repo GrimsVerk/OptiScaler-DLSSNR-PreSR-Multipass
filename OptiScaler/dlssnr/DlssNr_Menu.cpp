@@ -237,6 +237,26 @@ void RenderMenu(Config* config, float menuResScale)
         if (finished && config->DlssNrFinishedHudless.value_or_default())
         {
             ImGui::Indent();
+            int applyMode = config->DlssNrHudlessApplyMode.value_or_default() == 1 ? 1 : 0;
+            if (ImGui::Combo("NR apply mode", &applyMode, "Ratio (multiplied)\0Add (difference)\0"))
+                config->DlssNrHudlessApplyMode = applyMode;
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "How NR's change reaches the picture.\n"
+                    "Ratio: each pixel is multiplied by NR / input, so the change is relative to the pixel; smoothing\n"
+                    "and motion-adaptive strength work on that relative change. Bounded by the ratio limit below.\n"
+                    "Add: NR - input is added as an absolute amount (the behaviour before this option).\n"
+                    "Switching restarts the smoothing history.");
+            if (applyMode == 0)
+            {
+                float limit = config->DlssNrHudlessRatioLimit.value_or_default();
+                if (ImGui::SliderFloat("Ratio limit", &limit, 1.5f, 16.0f, "%.1fx", ImGuiSliderFlags_AlwaysClamp))
+                    config->DlssNrHudlessRatioLimit = limit;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("The most NR may brighten (or 1 / it, darken) a pixel in ratio mode.");
+            }
             bool adaptive = config->DlssNrHudlessMotionAdaptive.value_or_default();
             if (PipelineUi::CheckboxWrapped("Motion-adaptive NR strength", &adaptive, toggleWidth))
                 config->DlssNrHudlessMotionAdaptive = adaptive;

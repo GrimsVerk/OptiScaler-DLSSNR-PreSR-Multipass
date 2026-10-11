@@ -461,6 +461,7 @@ struct DlssNr_Dx12::State
         ComPtr<ID3D12Resource> hudlessOut, hudlessHistory[2], hudlessPrevInput;
         unsigned hudlessHistoryIndex = 0;
         bool hudlessHistoryValid = false;
+        int hudlessApplyMode = -1; // the history was built in this apply mode
         uint64_t hudlessSerial = 0, hudlessFrames = 0, hudlessWindow = 0;
         bool hudlessSeen = false;
         double hudlessCpuMs = 0.0, hudlessCpuMaxMs = 0.0;

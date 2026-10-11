@@ -12,7 +12,7 @@
 cbuffer Params : register(b0)
 {
     uint gMode;   // unused; keeps the shared layout (the dispatch reads width and height at offsets 8 and 12)
-    uint gUnused0;
+    uint gApplyRatio; // 0: NR's change is added (difference); 1: applied as a ratio, worked on as log2(NR / input)
     uint gWidth;
     uint gHeight;
     uint gGuideX;
@@ -33,6 +33,7 @@ cbuffer Params : register(b0)
     uint gDebugView;
     float gReject;    // picture-change threshold (luma); history fades out from gReject to 2 * gReject, 0 = off
     uint gBandSplit;  // 1: smooth the coarse change only
+    float gRatioLimit; // ratio mode: largest gain (1 / it the smallest)
 };
 
 Texture2D<float4> gNr : register(t0);        // NR output of the HUD-less picture
@@ -44,6 +45,8 @@ RWTexture2D<float4> gHistoryOut : register(u0); // this frame's smoothed change
 RWTexture2D<float4> gOutput : register(u1);     // HUD-less picture with the adjusted change
 
 static const float kEpsilon = 0.5 / 255.0;
+static const float kRatioEpsilon = 1.0 / 255.0; // ratio mode: keeps black pixels finite
+static const float kLogSlack = 1.0 / 64.0;      // ratio mode: history clamp slack, in log2 units
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 static const float kBinomial[5] = { 1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0 };
 
@@ -102,7 +105,16 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID, uint
     for (uint i = local.y * 8 + local.x; i < 144; i += 64)
     {
         int2 q = ClampPixel(tileBase + int2(i % 12, i / 12));
-        sChange[i / 12][i % 12] = Finite3(gNr.Load(int3(q, 0)).rgb - gInput.Load(int3(q, 0)).rgb);
+        if (gApplyRatio != 0)
+        {
+            // Relative change in the log domain: smoothing, tolerance, band split and strength stay linear there.
+            const float logLimit = log2(clamp(gRatioLimit, 1.5, 16.0));
+            sChange[i / 12][i % 12] = clamp(Finite3(log2((max(gNr.Load(int3(q, 0)).rgb, 0.0) + kRatioEpsilon) /
+                                                         (max(gInput.Load(int3(q, 0)).rgb, 0.0) + kRatioEpsilon))),
+                                            -logLimit, logLimit);
+        }
+        else
+            sChange[i / 12][i % 12] = Finite3(gNr.Load(int3(q, 0)).rgb - gInput.Load(int3(q, 0)).rgb);
     }
     GroupMemoryBarrierWithGroupSync();
     if (id.x >= gWidth || id.y >= gHeight)
@@ -157,8 +169,9 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID, uint
                 }
             float3 mean = m1 / 9.0;
             float3 sigma = sqrt(max(m2 / 9.0 - mean * mean, 0.0));
-            float3 history = clamp(SampleHistory(previous), mean - gTolerance * sigma - kEpsilon,
-                                   mean + gTolerance * sigma + kEpsilon);
+            const float slack = gApplyRatio != 0 ? kLogSlack : kEpsilon;
+            float3 history = clamp(SampleHistory(previous), mean - gTolerance * sigma - slack,
+                                   mean + gTolerance * sigma + slack);
             float weight = saturate(gCurrentWeight);
             if (gReject > 0.0)
             {
@@ -179,7 +192,16 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID, uint
         strength = lerp(gStillStrength, gMotionStrength, moving);
     }
     float3 adjusted = smoothed + fine;
-    float3 result = saturate(input.rgb + strength * adjusted);
+    float3 result;
+    if (gApplyRatio != 0)
+    {
+        const float logLimit = log2(clamp(gRatioLimit, 1.5, 16.0));
+        result = saturate((max(input.rgb, 0.0) + kRatioEpsilon) * exp2(clamp(strength * adjusted, -logLimit, logLimit)) -
+                          kRatioEpsilon);
+        result = all(isfinite(result)) ? result : saturate(input.rgb);
+    }
+    else
+        result = saturate(input.rgb + strength * adjusted);
     if (gDebugView == 1)
         result = lerp(input.rgb, float3(1.0, 0.0, 0.0), 0.65 * saturate(length(motion) / max(gMotionFull, 1e-3)));
     else if (gDebugView == 2)

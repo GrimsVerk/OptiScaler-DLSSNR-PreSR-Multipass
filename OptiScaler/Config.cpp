@@ -351,6 +351,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrHudlessDebugView.set_from_config(readInt("DlssNr", "HudlessDebugView"));
             DlssNrHudlessTestControl.set_from_config(readBool("DlssNr", "HudlessTestControl"));
             DlssNrHudlessProfile.set_from_config(readBool("DlssNr", "HudlessProfile"));
+            DlssNrHudlessApplyMode.set_from_config(readInt("DlssNr", "HudlessApplyMode"));
+            DlssNrHudlessRatioLimit.set_from_config(readFloat("DlssNr", "HudlessRatioLimit"));
             DlssNrFinishedDiagnostics.set_from_config(readBool("DlssNr", "FinishedDiagnostics"));
             DlssNrHdrTransfer.set_from_config(readBool("DlssNr", "HdrTransfer"));
             DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
@@ -1319,6 +1321,10 @@ bool Config::SaveIni(std::filesystem::path destination)
                      GetBoolValue(Instance()->DlssNrHudlessTestControl.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HudlessProfile",
                      GetBoolValue(Instance()->DlssNrHudlessProfile.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessApplyMode",
+                     GetIntValue(Instance()->DlssNrHudlessApplyMode.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessRatioLimit",
+                     GetFloatValue(Instance()->DlssNrHudlessRatioLimit.value_for_config()).c_str());
         ini.SetValue("DlssNr", "FinishedDiagnostics",
                      GetBoolValue(Instance()->DlssNrFinishedDiagnostics.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HdrTransfer", GetBoolValue(Instance()->DlssNrHdrTransfer.value_for_config()).c_str());

@@ -275,6 +275,8 @@ class Config
     CustomOptional<int> DlssNrHudlessDebugView { 0 };
     CustomOptional<bool> DlssNrHudlessTestControl { false }; // test harness: live settings + crop recorder
     CustomOptional<bool> DlssNrHudlessProfile { false };     // per-step GPU time of the HUD-less picture
+    CustomOptional<int> DlssNrHudlessApplyMode { 0 };        // HUD-less NR applied as 0 = ratio, 1 = added difference
+    CustomOptional<float> DlssNrHudlessRatioLimit { 4.0f };  // ratio mode: largest gain (and 1 / smallest)
     CustomOptional<bool> DlssNrFinishedDiagnostics { false };
     // Fit the scene-to-finished HDR response for early residuals.
     CustomOptional<bool> DlssNrHdrTransfer { false };

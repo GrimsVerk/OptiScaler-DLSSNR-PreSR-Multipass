@@ -161,6 +161,10 @@ class Harness
                 cfg.DlssNrHudlessSmoothingDetail = number() != 0;
             else if (key == "DebugView")
                 cfg.DlssNrHudlessDebugView = (int) number();
+            else if (key == "ApplyMode")
+                cfg.DlssNrHudlessApplyMode = (int) number();
+            else if (key == "RatioLimit")
+                cfg.DlssNrHudlessRatioLimit = number();
             else if (key == "ApplyModel")
                 cfg.DlssNrApplyModel = number() != 0;
             else if (key == "Enabled")

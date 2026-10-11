@@ -463,6 +463,17 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                 // Motion-adaptive strength and smoothing adjust NR's change in one pass into hudlessOut; without
                 // them the NR output is used as it is.
                 const auto temporalSettings = DlssNr::HudlessTemporal::ReadSettings(cfg);
+                // NR's change as a ratio (default) or an added difference. A history built in the other
+                // domain is meaningless, so a switch starts the smoothing afresh.
+                const bool applyRatio = cfg.DlssNrHudlessApplyMode.value_or_default() != 1;
+                const float ratioLimit = std::isfinite(cfg.DlssNrHudlessRatioLimit.value_or_default())
+                                             ? std::clamp(cfg.DlssNrHudlessRatioLimit.value_or_default(), 1.5f, 16.0f)
+                                             : 4.0f;
+                if (late.hudlessApplyMode != (applyRatio ? 0 : 1))
+                {
+                    late.hudlessApplyMode = applyRatio ? 0 : 1;
+                    late.hudlessHistoryValid = false;
+                }
                 ID3D12Resource* edited = work;
                 DlssNr::HudlessTemporal::Constants temporal {};
                 const auto& f = slot.frame;
@@ -518,6 +529,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                         temporal.debugView = (unsigned) temporalSettings.debugView;
                         temporal.reject = temporalSettings.reject;
                         temporal.bandSplit = temporalSettings.bandSplit ? 1u : 0u;
+                        temporal.applyRatio = applyRatio ? 1u : 0u;
+                        temporal.ratioLimit = ratioLimit;
                         const unsigned next = late.hudlessHistoryIndex ^ 1u;
                         auto* historyIn = late.hudlessHistory[late.hudlessHistoryIndex].Get();
                         auto* historyOut = late.hudlessHistory[next].Get();
@@ -557,6 +570,11 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                 blend.Width = (unsigned) desc.Width;
                 blend.Height = desc.Height;
                 blend.DebugView = hudlessMask ? (hudless.maskInAlpha ? 2u : 1u) : 0u;
+                if (applyRatio)
+                {
+                    blend.ColourStrength = 1.0f; // shader: apply NR's change as a ratio
+                    blend.MaxRatio = ratioLimit;
+                }
                 hudlessApplied = shader.DispatchResidualPass(cmd, blend, color, edited, source,
                                                              hudlessMask ? hudlessMask : source, composite, true);
                 DlssNr::HudlessProfile::Mark(cmd, "UI blend");

@@ -12,7 +12,7 @@ struct Constants
 {
     // Mode and Width/Height sit where the shared dispatch reads them (offsets 0, 8, 12) to size the grid.
     uint32_t mode = 0;
-    uint32_t unused = 0;
+    uint32_t applyRatio = 0; // 0 = NR change added, 1 = applied as a ratio (log domain)
     uint32_t width = 0, height = 0;
     uint32_t guideX = 0, guideY = 0, guideWidth = 0, guideHeight = 0;
     float mvToOutX = 0, mvToOutY = 0;
@@ -25,7 +25,8 @@ struct Constants
     uint32_t debugView = 0;
     float reject = 0;       // picture-change threshold (luma), 0 = off
     uint32_t bandSplit = 0; // smooth the coarse change only
-    uint32_t padding[42] {};
+    float ratioLimit = 4;   // ratio mode: largest gain
+    uint32_t padding[41] {};
 };
 static_assert(sizeof(Constants) == 256);
 

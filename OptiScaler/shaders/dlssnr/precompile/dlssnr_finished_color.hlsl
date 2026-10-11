@@ -179,7 +179,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         0.0163914, 0.0880133, 0.8955953 };
     if (mode == 10)
     {
-        // HUD-less finished picture. t0 = the presented picture (with HUD), t1 = NR output of the game's HUD-less
+        // HUD-less finished picture. curveUpdateWeight > 0.5: ratio, maxRatio bounds the gain; otherwise added.
+        // t0 = the presented picture (with HUD), t1 = NR output of the game's HUD-less
         // picture, t2 = that HUD-less picture before NR, t3 = the game's UI mask. NR's change is added only where
         // no UI covers the scene. curveHistoryValid: 1 = mask in the first channel, 2 = mask in alpha, 0 = no mask
         // (the UI is found where the presented picture differs from the HUD-less one).
@@ -195,7 +196,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             ui = response.Load(int3(id.xy, 0)).a;
         else
             ui = any(abs(pixel.rgb - base) > 2.0 / 255.0) ? 1.0 : 0.0;
-        target[id.xy] = float4(pixel.rgb + delta * (1.0 - saturate(ui)), pixel.a);
+        if (curveUpdateWeight > 0.5)
+        {
+            // Ratio: the presented pixel is multiplied by NR / input (per channel), so the change is relative to
+            // the pixel. Where no UI covers the scene the presented pixel equals the input and the result is NR's
+            // output. A small epsilon keeps black pixels finite and the gain is bounded both ways.
+            const float kRatioEpsilon = 1.0 / 255.0;
+            float limit = clamp(maxRatio, 1.5, 16.0);
+            float3 gain = (max(edited, 0.0) + kRatioEpsilon) / (max(base, 0.0) + kRatioEpsilon);
+            gain = all(isfinite(gain)) ? clamp(gain, 1.0 / limit, limit) : 1.0;
+            float3 ratioResult = pixel.rgb + (max(pixel.rgb, 0.0) + kRatioEpsilon) * (gain - 1.0) * (1.0 - saturate(ui));
+            target[id.xy] = float4(all(isfinite(ratioResult)) ? ratioResult : pixel.rgb, pixel.a);
+        }
+        else
+            target[id.xy] = float4(pixel.rgb + delta * (1.0 - saturate(ui)), pixel.a);
         return;
     }
     if (mode == 5)
