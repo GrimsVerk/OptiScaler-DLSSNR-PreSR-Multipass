@@ -2,6 +2,7 @@
 #include "DlssNr_Dx12_State.h"
 #include <dlssnr/DlssNr_Hudless.h>
 #include <dlssnr/DlssNr_HudlessTest.h>
+#include "DlssNr_HudlessProfile.h"
 #include <chrono>
 #include <thread>
 
@@ -95,6 +96,7 @@ auto DlssNr_Dx12::State::CaptureFinalScreen(ID3D12Resource* color, ID3D12Command
     }
     ID3D12CommandList* lists[] = { list.Get() };
     queue->ExecuteCommandLists(1, lists);
+    DlssNr::HudlessProfile::Profiler::Get().Submitted(queue);
     if (FAILED(queue->Signal(screenCapture.fence.Get(), ++screenCapture.fenceValue)))
         return; // the readbacks may still be in flight: keep the job rather than free them
     CommitScreenCapture(job, screenCapture.fence.Get(), screenCapture.fenceValue, allocator.Get(), list.Get());
@@ -295,6 +297,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         return false;
     }
     auto* cmd = slot.commands.Get();
+    if (useHudless)
+        DlssNr::HudlessProfile::Profiler::Get().Begin(cmd, late.device.Get(), queue);
     auto* screenJob = BeginScreenCapture(cmd, late.device.Get(), color, "finished", colorSpace);
     if (holdFinished)
     {
@@ -448,8 +452,10 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
             cmd->CopyResource(work, source);
             Barrier(cmd, work, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceState);
+            DlssNr::HudlessProfile::Mark(cmd, "copy in");
             frame.OutputArrivalState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             Run(cmd, work, slot.depth.Get(), slot.motion.Get(), work, frame, queue);
+            DlssNr::HudlessProfile::Mark(cmd, "NR resolve");
             if (nr.successfulDispatches > before && Config::Instance()->DlssNrApplyModel.value_or_default())
             {
                 Barrier(cmd, work, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
@@ -520,12 +526,14 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                             cmd, temporal, work, source, historyIn, slot.motion.Get(), late.hudlessPrevInput.Get(),
                             historyOut, late.hudlessOut.Get());
                         Barrier(cmd, historyOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
+                        DlssNr::HudlessProfile::Mark(cmd, "temporal pass");
                         // This frame's input becomes the next frame's previous picture (for history rejection).
                         Barrier(cmd, late.hudlessPrevInput.Get(), readable, D3D12_RESOURCE_STATE_COPY_DEST);
                         Barrier(cmd, source, readable, D3D12_RESOURCE_STATE_COPY_SOURCE);
                         cmd->CopyResource(late.hudlessPrevInput.Get(), source);
                         Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_SOURCE, readable);
                         Barrier(cmd, late.hudlessPrevInput.Get(), D3D12_RESOURCE_STATE_COPY_DEST, readable);
+                        DlssNr::HudlessProfile::Mark(cmd, "previous-input copy");
                         if (adjusted)
                         {
                             Barrier(cmd, late.hudlessOut.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
@@ -551,6 +559,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                 blend.DebugView = hudlessMask ? (hudless.maskInAlpha ? 2u : 1u) : 0u;
                 hudlessApplied = shader.DispatchResidualPass(cmd, blend, color, edited, source,
                                                              hudlessMask ? hudlessMask : source, composite, true);
+                DlssNr::HudlessProfile::Mark(cmd, "UI blend");
                 if (hudlessApplied)
                 {
                     Barrier(cmd, composite, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -558,6 +567,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                     cmd->CopyResource(color, composite);
                     Barrier(cmd, color, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
                     Barrier(cmd, composite, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    DlssNr::HudlessProfile::Mark(cmd, "present copy");
                     auto& harness = DlssNr::HudlessTest::Harness::Get();
                     if (harness.Recording())
                     {
@@ -595,6 +605,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                     cmd->CopyResource(source, edited);
                     Barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_DEST, sourceState);
                     Barrier(cmd, edited, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    DlssNr::HudlessProfile::Mark(cmd, "FG HUD-less copy");
                 }
                 else
                 {
@@ -675,8 +686,10 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         screenJob->Copy(cmd, late.device.Get(), "screen_after_nr", color, D3D12_RESOURCE_STATE_PRESENT);
         screenJob->End(cmd);
     }
+    DlssNr::HudlessProfile::Profiler::Get().End(cmd);
     if (FAILED(cmd->Close()))
     {
+        DlssNr::HudlessProfile::Profiler::Get().Abandon();
         delete screenJob;
         late.heldFailed |= holdFinished;
         late.Say("Could not finish the picture. Restart the game to retry.");
@@ -688,6 +701,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     if (slot.producerQueue.Get() != realQueue && slot.fence->GetCompletedValue() < slot.ready &&
         FAILED(queue->Wait(slot.fence.Get(), slot.ready)))
     {
+        DlssNr::HudlessProfile::Profiler::Get().Abandon();
         delete screenJob;
         late.Say("The graphics queue stopped. Restart the game to retry.");
         return false;

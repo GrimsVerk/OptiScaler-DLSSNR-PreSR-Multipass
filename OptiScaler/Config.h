@@ -274,6 +274,7 @@ class Config
     CustomOptional<bool> DlssNrHudlessSmoothingDetail { true };
     CustomOptional<int> DlssNrHudlessDebugView { 0 };
     CustomOptional<bool> DlssNrHudlessTestControl { false }; // test harness: live settings + crop recorder
+    CustomOptional<bool> DlssNrHudlessProfile { false };     // per-step GPU time of the HUD-less picture
     CustomOptional<bool> DlssNrFinishedDiagnostics { false };
     // Fit the scene-to-finished HDR response for early residuals.
     CustomOptional<bool> DlssNrHdrTransfer { false };

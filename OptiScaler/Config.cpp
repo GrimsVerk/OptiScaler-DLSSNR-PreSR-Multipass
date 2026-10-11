@@ -350,6 +350,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrHudlessSmoothingDetail.set_from_config(readBool("DlssNr", "HudlessSmoothingDetail"));
             DlssNrHudlessDebugView.set_from_config(readInt("DlssNr", "HudlessDebugView"));
             DlssNrHudlessTestControl.set_from_config(readBool("DlssNr", "HudlessTestControl"));
+            DlssNrHudlessProfile.set_from_config(readBool("DlssNr", "HudlessProfile"));
             DlssNrFinishedDiagnostics.set_from_config(readBool("DlssNr", "FinishedDiagnostics"));
             DlssNrHdrTransfer.set_from_config(readBool("DlssNr", "HdrTransfer"));
             DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
@@ -1316,6 +1317,8 @@ bool Config::SaveIni(std::filesystem::path destination)
                      GetIntValue(Instance()->DlssNrHudlessDebugView.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HudlessTestControl",
                      GetBoolValue(Instance()->DlssNrHudlessTestControl.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessProfile",
+                     GetBoolValue(Instance()->DlssNrHudlessProfile.value_for_config()).c_str());
         ini.SetValue("DlssNr", "FinishedDiagnostics",
                      GetBoolValue(Instance()->DlssNrFinishedDiagnostics.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HdrTransfer", GetBoolValue(Instance()->DlssNrHdrTransfer.value_for_config()).c_str());
