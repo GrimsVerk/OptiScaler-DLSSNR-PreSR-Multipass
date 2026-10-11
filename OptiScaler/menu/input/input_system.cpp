@@ -434,11 +434,12 @@ void PollTextInputLocked(const std::array<bool, 256>& polledDown)
     {
         _state.PolledTextKeyDown.fill(false);
         _state.PendingPolledText.clear();
+        _state.PendingSawChar = false;
         return;
     }
 
     // Last frame's presses had a full message pump to produce WM_CHAR. If none came, they are text.
-    if (!charMessages && !_state.PendingPolledText.empty())
+    if (!charMessages && !_state.PendingSawChar && !_state.PendingPolledText.empty())
     {
         _state.TextInput += _state.PendingPolledText;
 
@@ -449,6 +450,8 @@ void PollTextInputLocked(const std::array<bool, 256>& polledDown)
         }
     }
     _state.PendingPolledText.clear();
+    // WM_CHAR seen in the frame of the press: the press already produced its text.
+    _state.PendingSawChar = charMessages;
 
     // Only key-down edges are text; skip the keyboard-state and layout work on frames without one.
     std::array<bool, 256> pressed {};

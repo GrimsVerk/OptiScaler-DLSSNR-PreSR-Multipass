@@ -373,6 +373,9 @@ struct InputState
     bool PolledTextLogged = false;
     std::array<bool, 256> PolledTextKeyDown {};
     std::wstring PendingPolledText;
+    // A WM_CHAR can also arrive before the poll that sees its key go down (same frame). Remember that, or the
+    // pending text would be added a frame later as well and every key would type twice.
+    bool PendingSawChar = false;
 
     std::recursive_mutex Mutex;
 };
