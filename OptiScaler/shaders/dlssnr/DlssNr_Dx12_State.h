@@ -462,6 +462,11 @@ struct DlssNr_Dx12::State
         unsigned hudlessHistoryIndex = 0;
         bool hudlessHistoryValid = false;
         int hudlessApplyMode = -1; // the history was built in this apply mode
+        // recordBoth: the other apply mode, computed alongside for same-frame recordings only. Its own output
+        // and smoothing history (kept once created: about 165 MB at 4K).
+        ComPtr<ID3D12Resource> hudlessOutAlt, hudlessHistoryAlt[2];
+        unsigned hudlessHistoryAltIndex = 0;
+        bool hudlessHistoryAltValid = false;
         uint64_t hudlessSerial = 0, hudlessFrames = 0, hudlessWindow = 0;
         bool hudlessSeen = false;
         double hudlessCpuMs = 0.0, hudlessCpuMaxMs = 0.0;

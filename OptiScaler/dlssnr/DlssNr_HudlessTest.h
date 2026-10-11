@@ -169,6 +169,8 @@ class Harness
                 cfg.DlssNrApplyModel = number() != 0;
             else if (key == "Enabled")
                 cfg.DlssNrEnabled = number() != 0;
+            else if (key == "recordBoth")
+                _dual = number() != 0;
             else if (key == "record")
                 record = value;
             else if (key == "frames")
@@ -184,6 +186,12 @@ class Harness
     }
 
     bool Recording() const { return _remaining > 0 && !_failed; }
+
+    // recordBoth=1 (sticky until recordBoth=0): the frame is also computed in the other NR apply mode, with its
+    // own smoothing history, so a recording can hold the add and the ratio result of the same frame.
+    bool Dual() const { return Enabled() && _dual; }
+    // The recording in progress stores [before NR, add result, ratio result] instead of [before, NR, adjusted].
+    bool RecordingDual() const { return _recordingDual; }
 
     // Called with the frame's command list, after the adjusted output is written and before it is copied back.
     // Every source is returned to the state it came in.
@@ -371,6 +379,7 @@ class Harness
         }
         _name = name;
         _directory = directory;
+        _recordingDual = _dual;
         _remaining = frames;
         _recorded = 0;
         _written = 0;
@@ -475,7 +484,10 @@ class Harness
             return false;
         }
         std::ofstream meta(_directory / (_name + ".json"));
-        meta << "{\n  \"name\": \"" << _name << "\",\n  \"colour_format\": " << colourDesc.Format
+        meta << "{\n  \"name\": \"" << _name << "\",\n  \"dual\": " << (_recordingDual ? 1 : 0)
+             << ",\n  \"blocks\": "
+             << (_recordingDual ? "[\"before\", \"add\", \"ratio\"]" : "[\"before\", \"nr\", \"adjusted\"]")
+             << ",\n  \"colour_format\": " << colourDesc.Format
              << ",\n  \"motion_format\": " << motionDesc.Format << ",\n  \"colour_bytes\": " << _colourBytes
              << ",\n  \"motion_bytes\": " << _motionBytes << ",\n  \"header_bytes\": " << sizeof(FrameHeader)
              << ",\n  \"frame_bytes\": " << _frameBytes << ",\n  \"output\": [" << info.outputWidth << ", "
@@ -583,6 +595,7 @@ class Harness
     std::vector<Rect> _crops, _guideCrops;
     std::vector<Layout> _layouts;
     std::string _name;
+    bool _dual = false, _recordingDual = false;
     std::filesystem::path _directory;
     std::FILE* _file = nullptr;
     std::atomic<int> _remaining { 0 };

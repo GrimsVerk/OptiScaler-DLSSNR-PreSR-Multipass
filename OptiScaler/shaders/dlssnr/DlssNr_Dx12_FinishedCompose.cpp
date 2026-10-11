@@ -475,6 +475,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                     late.hudlessHistoryValid = false;
                 }
                 ID3D12Resource* edited = work;
+                ID3D12Resource* alternate = nullptr; // recordBoth: the other apply mode's result of this frame
                 DlssNr::HudlessTemporal::Constants temporal {};
                 const auto& f = slot.frame;
                 const auto motionDesc = slot.motion->GetDesc();
@@ -540,6 +541,42 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                             historyOut, late.hudlessOut.Get());
                         Barrier(cmd, historyOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
                         DlssNr::HudlessProfile::Mark(cmd, "temporal pass");
+                        // recordBoth: run the pass again in the other apply mode, on the same inputs (before the
+                        // previous-input copy below), with its own history. Only the selected mode is shown.
+                        if (DlssNr::HudlessTest::Harness::Get().Dual())
+                        {
+                            if (ensureTexture(late.hudlessOutAlt, hudlessFormat, false) &&
+                                ensureTexture(late.hudlessHistoryAlt[0], DXGI_FORMAT_R16G16B16A16_FLOAT, true) &&
+                                ensureTexture(late.hudlessHistoryAlt[1], DXGI_FORMAT_R16G16B16A16_FLOAT, true))
+                            {
+                                auto other = temporal;
+                                other.applyRatio = applyRatio ? 0u : 1u;
+                                other.debugView = 0;
+                                other.historyValid = late.hudlessHistoryAltValid && temporalSettings.smoothing &&
+                                                     !f.Reset && !late.reset;
+                                const unsigned otherNext = late.hudlessHistoryAltIndex ^ 1u;
+                                auto* otherIn = late.hudlessHistoryAlt[late.hudlessHistoryAltIndex].Get();
+                                auto* otherOut = late.hudlessHistoryAlt[otherNext].Get();
+                                Barrier(cmd, otherOut, readable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                                const bool otherDone = shader.DispatchHudlessTemporal(
+                                    cmd, other, work, source, otherIn, slot.motion.Get(), late.hudlessPrevInput.Get(),
+                                    otherOut, late.hudlessOutAlt.Get());
+                                Barrier(cmd, otherOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readable);
+                                if (otherDone)
+                                {
+                                    Barrier(cmd, late.hudlessOutAlt.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            readable);
+                                    alternate = late.hudlessOutAlt.Get();
+                                    late.hudlessHistoryAltIndex = otherNext;
+                                    late.hudlessHistoryAltValid = temporalSettings.smoothing;
+                                }
+                                else
+                                    late.hudlessHistoryAltValid = false;
+                            }
+                            DlssNr::HudlessProfile::Mark(cmd, "temporal pass (other mode)");
+                        }
+                        else
+                            late.hudlessHistoryAltValid = false;
                         // This frame's input becomes the next frame's previous picture (for history rejection).
                         Barrier(cmd, late.hudlessPrevInput.Get(), readable, D3D12_RESOURCE_STATE_COPY_DEST);
                         Barrier(cmd, source, readable, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -615,8 +652,17 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                         info.tolerance = temporal.tolerance;
                         info.reject = temporal.reject;
                         info.bandSplit = temporal.bandSplit;
-                        hudlessRecorded = harness.Record(cmd, late.device.Get(), { source, readable }, { work, readable },
-                                                         { edited, readable }, { slot.motion.Get(), readable }, info);
+                        DlssNr::HudlessTest::Source second { work, readable }, third { edited, readable };
+                        if (harness.RecordingDual())
+                        {
+                            // [before, add, ratio] of this frame. Without the temporal pass both modes show NR's
+                            // own output, so the shown picture stands in for the other mode.
+                            ID3D12Resource* other = alternate ? alternate : edited;
+                            second = { applyRatio ? other : edited, readable };
+                            third = { applyRatio ? edited : other, readable };
+                        }
+                        hudlessRecorded = harness.Record(cmd, late.device.Get(), { source, readable }, second, third,
+                                                         { slot.motion.Get(), readable }, info);
                     }
                     Barrier(cmd, edited, readable, D3D12_RESOURCE_STATE_COPY_SOURCE);
                     Barrier(cmd, source, readable, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -634,6 +680,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                 }
                 if (edited != work)
                     Barrier(cmd, work, readable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                if (alternate)
+                    Barrier(cmd, alternate, readable, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 if (hudlessMask)
                     Barrier(cmd, hudlessMask, readable, hudless.mask.state);
             }
