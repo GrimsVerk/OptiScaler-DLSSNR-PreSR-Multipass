@@ -206,6 +206,8 @@ void ModelVk::Impl::Shutdown()
     state.passClamp.Destroy(state.device);
     state.proxy.Destroy(state.device);
     state.proxySmall.Destroy(state.device);
+    state.guideA.Destroy(state.device);
+    state.guideB.Destroy(state.device);
     state.spatialProxy.Destroy(state.device);
     state.spatialDepth.Destroy(state.device);
     state.spatialMotion.Destroy(state.device);
@@ -329,6 +331,8 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
         const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
 
         state.proxySmall.Destroy(state.device);
+    state.guideA.Destroy(state.device);
+    state.guideB.Destroy(state.device);
         state.spatialProxy.Destroy(state.device);
         state.spatialDepth.Destroy(state.device);
         state.spatialMotion.Destroy(state.device);

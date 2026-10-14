@@ -573,6 +573,34 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
         }
     }
 
+    // Transfer 5 two-pass: fit the guided filter once per low-res texel, then let the resolve read a and b
+    // bilinearly (in the proxy / answer slots) instead of refitting four 3x3 windows at every full-size pixel.
+    const bool guidedTwoPass =
+        reduced && workScale < 1.0f && resolve.Transfer == 5 && resolve.DebugView == 0 && resolve.CompareMode == 0 &&
+        cfg.DlssNrGuidedTwoPass.value_or_default() && resolveProxy == modelInput && resolveAnswer == answer &&
+        state.guideA.Ensure(device, physicalDevice, workWidth, workHeight, VK_FORMAT_R16G16B16A16_SFLOAT) &&
+        state.guideB.Ensure(device, physicalDevice, workWidth, workHeight, VK_FORMAT_R16G16B16A16_SFLOAT);
+    if (guidedTwoPass)
+    {
+        Transition(cmdBuffer, *resolveProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmdBuffer, *resolveAnswer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmdBuffer, state.guideA, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmdBuffer, state.guideB, VK_IMAGE_LAYOUT_GENERAL);
+        DlssNrConstants coef = resolve;
+        coef.Mode = DlssNrMode_GuidedCoefficients;
+        coef.Width = workWidth;
+        coef.Height = workHeight;
+        if (state.pass->Dispatch(cmdBuffer, coef, workWidth, workHeight, resolveProxy->info.ImageView,
+                                 resolveAnswer->info.ImageView, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                 state.guideA.info.ImageView, state.guideB.info.ImageView,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+        {
+            resolve.Reserved = 2; // the resolve reads a, b from the proxy / answer slots
+            resolveProxy = &state.guideA;
+            resolveAnswer = &state.guideB;
+        }
+    }
+
     // Match DX12: inspect the immutable packed model input using the existing proxy display.
     if (resolve.DebugView == 4)
     {

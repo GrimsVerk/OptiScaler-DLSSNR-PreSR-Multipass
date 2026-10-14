@@ -56,6 +56,11 @@ struct VkState
     // scale slider. Unused (and never created) at scale 1, so the default path is unchanged.
     ImageVk proxySmall;
 
+    // Transfer 5 two-pass: the guided filter's a and b per low-res texel, read bilinearly by the resolve.
+    // Created on first use, so other enlargement modes do not pay their memory.
+    ImageVk guideA;
+    ImageVk guideB;
+
     // Spatial compression has its own packed model input and typed packed guides. Vulkan
     // stores motion in RGBA32F to avoid requiring shaderStorageImageExtendedFormats for
     // RG32F storage writes; NGX reads its xy channels. The two ordinary-size images hold

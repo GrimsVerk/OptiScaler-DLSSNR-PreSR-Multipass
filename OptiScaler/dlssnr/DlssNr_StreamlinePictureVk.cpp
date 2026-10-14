@@ -2,6 +2,7 @@
 #include "DlssNr_StreamlinePictureVk.h"
 #include "DlssNr_HudlessVk.h"
 #include "DlssNrFinished_Vk.h"
+#include "DlssNr_HudlessTest.h"
 #include <Config.h>
 #include <State.h>
 #include "detours/detours.h"
@@ -25,6 +26,7 @@ PFN_vkGetSwapchainImagesKHR interposerSwapchainImages = nullptr;
 
 VkResult VKAPI_CALL PresentBeforeStreamline(VkQueue queue, const VkPresentInfoKHR* present)
 {
+    HudlessTest::Harness::Get().Poll(); // test harness only (HudlessTestControl); live settings
     HudlessVk::Frame frame;
     const bool fresh = HudlessVk::Take(frame, lastTagSerial);
     VkPresentInfoKHR local = present ? *present : VkPresentInfoKHR {};

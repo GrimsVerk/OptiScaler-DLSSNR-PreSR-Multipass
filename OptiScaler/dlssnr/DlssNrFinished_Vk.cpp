@@ -752,6 +752,7 @@ struct FinishedVk::Impl
         ImageVk input, nr, adjusted, history[2];
         unsigned historyIndex = 0;
         bool historyValid = false;
+        int applyMode = -1; // the apply mode the history was built in
         std::vector<VkSemaphore> ready;
         uint64_t frames = 0;
     } hud;
@@ -987,6 +988,17 @@ struct FinishedVk::Impl
         {
             ImageVk* edited = &hud.nr;
             const auto settings = HudlessTemporal::ReadSettings(cfg);
+            // NR's change as a ratio (default) or an added difference. A history built in the other domain is
+            // meaningless, so a switch starts the smoothing afresh.
+            const bool applyRatio = cfg.DlssNrHudlessApplyMode.value_or_default() != 1;
+            const float ratioLimit = std::isfinite(cfg.DlssNrHudlessRatioLimit.value_or_default())
+                                         ? std::clamp(cfg.DlssNrHudlessRatioLimit.value_or_default(), 1.5f, 16.0f)
+                                         : 4.0f;
+            if (hud.applyMode != (applyRatio ? 0 : 1))
+            {
+                hud.applyMode = applyRatio ? 0 : 1;
+                hud.historyValid = false;
+            }
             if (settings.Active() && shader.HudlessTemporalReady() && ensure(hud.adjusted, VK_FORMAT_R16G16B16A16_SFLOAT))
             {
                 bool historyReady = true;
@@ -1025,6 +1037,8 @@ struct FinishedVk::Impl
                     c.debugView = (unsigned) settings.debugView;
                     c.reject = settings.reject;
                     c.bandSplit = settings.bandSplit ? 1u : 0u;
+                    c.applyRatio = applyRatio ? 1u : 0u;
+                    c.ratioLimit = ratioLimit;
                     const unsigned next = hud.historyIndex ^ 1u;
                     Transition(cmd, hud.input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     Transition(cmd, hud.history[hud.historyIndex], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1057,6 +1071,11 @@ struct FinishedVk::Impl
             blend.Width = size.width;
             blend.Height = size.height;
             blend.DebugView = 2; // UI coverage in alpha
+            if (applyRatio)
+            {
+                blend.ColourStrength = 1.0f; // shader: apply NR's change as a ratio
+                blend.MaxRatio = ratioLimit;
+            }
             const bool composed = shader.Dispatch(cmd, blend, size.width, size.height, bbView, edited->info.ImageView,
                                                   hud.input.info.ImageView, uiView, bbView, bbView,
                                                   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, true);
