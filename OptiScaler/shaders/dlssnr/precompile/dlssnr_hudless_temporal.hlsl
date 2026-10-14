@@ -8,8 +8,17 @@
 //  - motion-adaptive strength scales the result by on-screen motion.
 // Bindings follow the shared NR root signature: five SRVs (t0..t4), two UAVs (u0, u1), one constant buffer.
 // Keep in step with DlssNr::HudlessTemporal::Constants and the offline model (w3night/fastsim.py).
+//
+// Vulkan (compiled with -D VULKAN): the NR pass's descriptor set has four reads and two writes, so there is no
+// fifth read for the previous picture. The history's alpha carries the previous picture's luma instead.
 
-cbuffer Params : register(b0)
+#ifdef VULKAN
+#define VK_BINDING(n) [[vk::binding(n, 0)]]
+#else
+#define VK_BINDING(n)
+#endif
+
+VK_BINDING(0) cbuffer Params : register(b0)
 {
     uint gMode;   // unused; keeps the shared layout (the dispatch reads width and height at offsets 8 and 12)
     uint gApplyRatio; // 0: NR's change is added (difference); 1: applied as a ratio, worked on as log2(NR / input)
@@ -36,13 +45,15 @@ cbuffer Params : register(b0)
     float gRatioLimit; // ratio mode: largest gain (1 / it the smallest)
 };
 
-Texture2D<float4> gNr : register(t0);        // NR output of the HUD-less picture
-Texture2D<float4> gInput : register(t1);     // the HUD-less picture before NR
-Texture2D<float4> gHistory : register(t2);   // previous smoothed (coarse or full) change, signed float
-Texture2D<float4> gMotion : register(t3);    // the game's motion vectors (copy)
+VK_BINDING(1) Texture2D<float4> gNr : register(t0);        // NR output of the HUD-less picture
+VK_BINDING(2) Texture2D<float4> gInput : register(t1);     // the HUD-less picture before NR
+VK_BINDING(3) Texture2D<float4> gHistory : register(t2);   // previous smoothed (coarse or full) change, signed float
+VK_BINDING(4) Texture2D<float4> gMotion : register(t3);    // the game's motion vectors (copy)
+#ifndef VULKAN
 Texture2D<float4> gPrevInput : register(t4); // previous frame's HUD-less picture before NR
-RWTexture2D<float4> gHistoryOut : register(u0); // this frame's smoothed change
-RWTexture2D<float4> gOutput : register(u1);     // HUD-less picture with the adjusted change
+#endif
+VK_BINDING(5) RWTexture2D<float4> gHistoryOut : register(u0); // this frame's smoothed change
+VK_BINDING(6) RWTexture2D<float4> gOutput : register(u1);     // HUD-less picture with the adjusted change
 
 static const float kEpsilon = 0.5 / 255.0;
 static const float kRatioEpsilon = 1.0 / 255.0; // ratio mode: keeps black pixels finite
@@ -90,10 +101,17 @@ float PreviousLuma(float2 position)
     float2 texel = clamp(position - 0.5, 0.0, float2(gWidth - 1, gHeight - 1) - 0.001);
     int2 base = int2(floor(texel));
     float2 f = texel - base;
+#ifdef VULKAN
+    float a = gHistory.Load(int3(base, 0)).a;
+    float b = gHistory.Load(int3(base + int2(1, 0), 0)).a;
+    float c = gHistory.Load(int3(base + int2(0, 1), 0)).a;
+    float d = gHistory.Load(int3(base + int2(1, 1), 0)).a;
+#else
     float a = dot(gPrevInput.Load(int3(base, 0)).rgb, kLuma);
     float b = dot(gPrevInput.Load(int3(base + int2(1, 0), 0)).rgb, kLuma);
     float c = dot(gPrevInput.Load(int3(base + int2(0, 1), 0)).rgb, kLuma);
     float d = dot(gPrevInput.Load(int3(base + int2(1, 1), 0)).rgb, kLuma);
+#endif
     return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
 }
 
@@ -182,7 +200,11 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID, uint
             smoothed = lerp(history, band, weight);
         }
     }
+#ifdef VULKAN
+    gHistoryOut[id.xy] = float4(smoothed, dot(input.rgb, kLuma)); // next frame's previous-picture luma
+#else
     gHistoryOut[id.xy] = float4(smoothed, rejected);
+#endif
 
     float moving = 0.0;
     float strength = 1.0;

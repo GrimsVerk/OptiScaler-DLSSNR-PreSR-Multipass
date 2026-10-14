@@ -2,6 +2,7 @@
 #include "DlssNrFinished_Vk.h"
 #include "DlssNr_Image_Vk.h"
 #include "DlssNr_Status.h"
+#include "DlssNr_HudlessVk.h"
 #include <Config.h>
 #include <hooks/VulkanwDx12_Hooks.h>
 #include <algorithm>
@@ -38,6 +39,10 @@ struct PrivateQueue
     uint32_t family = UINT32_MAX;
 } privateQueue;
 std::string status = "Waiting for a finished Vulkan picture.";
+// Set once the game hands frame generation a HUD-less picture: the DLSS-G present hook then owns the finished
+// picture, and the ordinary present hook (which also sees generated frames) stays out of it.
+bool hudlessSeen = false;
+uint32_t hudlessMisses = 0;
 // Learned from submissions: games may evaluate DLSS on a compute queue and present from the graphics queue.
 std::map<VkQueue, uint32_t> queueFamilies;
 uint64_t presentEpoch = 0;
@@ -169,6 +174,8 @@ struct FinishedVk::Impl
         uint32_t family = UINT32_MAX;
         uint64_t epoch = 0, serial = 0;
         bool pending = false, submitted = false, validCapture = false;
+        // Views of the game's tagged images made for one HUD-less frame; destroyed once `done` has signalled.
+        std::vector<VkImageView> views;
     };
     // A slot holds one frame's depth and motion copies (about 24 MB at 1080p) from capture until its present-time
     // work has finished on the GPU. The GPU runs a few frames behind, so four slots ran out on about a quarter of
@@ -220,7 +227,17 @@ struct FinishedVk::Impl
                 vkDestroyCommandPool(device, s.pool, nullptr);
             if (s.presentPool)
                 vkDestroyCommandPool(device, s.presentPool, nullptr);
+            for (auto view : s.views)
+                vkDestroyImageView(device, view, nullptr);
         }
+        hud.input.Destroy(device);
+        hud.nr.Destroy(device);
+        hud.adjusted.Destroy(device);
+        for (auto& history : hud.history)
+            history.Destroy(device);
+        for (auto semaphore : hud.ready)
+            if (semaphore)
+                vkDestroySemaphore(device, semaphore, nullptr);
         work.input.Destroy(device);
         work.screenIn.Destroy(device);
         work.screenOut.Destroy(device);
@@ -387,6 +404,11 @@ struct FinishedVk::Impl
             !Config::Instance()->DlssNrFinishedPicture.value_or_default())
         {
             Diag("present: NR or finished picture off");
+            return false;
+        }
+        if (hudlessSeen && Config::Instance()->DlssNrFinishedHudless.value_or_default())
+        {
+            Diag("present: the HUD-less route owns the finished picture");
             return false;
         }
         if (screen.device != device || present->swapchainCount != 1 || present->pSwapchains[0] != screen.handle)
@@ -720,6 +742,371 @@ struct FinishedVk::Impl
                      screen.size.height);
         return true;
     }
+    // Finished picture without the HUD (frame generation through Streamline). Runs from the DLSS-G plugin's present
+    // hook, before frame generation reads the game's HUD-less picture: NR runs on a copy of that picture, its change
+    // goes into the backbuffer outside the UI layer, and the NR picture replaces the HUD-less one so generated
+    // frames carry NR too. Everything is recorded on the present queue, ordered after the game's frame by the
+    // present's own wait semaphores; the plugin then waits for this work instead.
+    struct Hudless
+    {
+        ImageVk input, nr, adjusted, history[2];
+        unsigned historyIndex = 0;
+        bool historyValid = false;
+        std::vector<VkSemaphore> ready;
+        uint64_t frames = 0;
+    } hud;
+    bool PresentHudless(VkQueue queue, VkPresentInfoKHR* present, const HudlessVk::Frame* tags,
+                        PFN_vkGetSwapchainImagesKHR swapchainImages)
+    {
+        const auto& cfg = *Config::Instance();
+        if (!tags)
+        {
+            if (hudlessSeen && ++hudlessMisses > 120)
+            {
+                // Frame generation went off: the ordinary finished picture takes over again.
+                hudlessSeen = false;
+                Say("No HUD-less picture from the game any more; back to the ordinary finished picture.");
+            }
+            else if (hudlessSeen)
+                Say("Waiting for the game's HUD-less picture.");
+            hud.historyValid = false;
+            return false;
+        }
+        hudlessMisses = 0;
+        const auto& h = tags->hudless;
+        const auto& ui = tags->ui;
+        auto bb = tags->backbuffer;
+        if (!h.Valid() || !ui.Valid() || !bb.Valid())
+        {
+            Diag("hudless: a tagged picture or its view is missing");
+            Say("The game's HUD-less picture, UI layer or backbuffer is missing.");
+            return false;
+        }
+        hudlessSeen = true;
+        if (h.width != bb.width || h.height != bb.height || ui.width != bb.width || ui.height != bb.height)
+        {
+            Diag("hudless: sizes differ", std::format("hudless {}x{}, ui {}x{}, backbuffer {}x{}", h.width, h.height,
+                                                      ui.width, ui.height, bb.width, bb.height));
+            Say("The game's HUD-less picture does not match the screen; nothing applied.");
+            hud.historyValid = false;
+            return false;
+        }
+        constexpr VkImageUsageFlags rw = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+        if ((h.usage & (rw | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) != (rw | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
+            (bb.usage & rw) != rw || !(ui.usage & VK_IMAGE_USAGE_SAMPLED_BIT))
+        {
+            Diag("hudless: unsupported image usage",
+                 std::format("hudless 0x{:x}, ui 0x{:x}, backbuffer 0x{:x}", (unsigned) h.usage, (unsigned) ui.usage,
+                             (unsigned) bb.usage));
+            Say("The game's HUD-less picture or backbuffer cannot be written by a shader.");
+            return false;
+        }
+        if (present->swapchainCount != 1)
+            return false;
+        // The game tags its backbuffer one frame ahead, and Streamline alternates two proxy images: the picture this
+        // present shows is the proxy at its image index, not the latest tag.
+        {
+            uint32_t count = 0;
+            std::array<VkImage, 8> images {};
+            if (!swapchainImages || swapchainImages(device, present->pSwapchains[0], &count, nullptr) != VK_SUCCESS ||
+                count == 0 || count > images.size() ||
+                swapchainImages(device, present->pSwapchains[0], &count, images.data()) != VK_SUCCESS ||
+                present->pImageIndices[0] >= count)
+            {
+                Diag("hudless: presented image unknown");
+                return false;
+            }
+            bb.image = images[present->pImageIndices[0]];
+        }
+        const VkExtent2D size { h.width, h.height };
+        Slot* latest = nullptr;
+        for (auto& s : slots)
+            if (s.pending && s.submitted && s.validCapture && s.epoch + 1 >= presentEpoch &&
+                s.frame.OutputWidth == size.width && s.frame.OutputHeight == size.height &&
+                (!latest || s.serial > latest->serial))
+                latest = &s;
+        if (!latest)
+        {
+            Diag("hudless: no captured frame matches");
+            hud.historyValid = false;
+            return false;
+        }
+        auto& s = *latest;
+        const auto presentFamilyIt = queueFamilies.find(queue);
+        if (presentFamilyIt == queueFamilies.end())
+        {
+            Diag("hudless: present queue family unknown", std::format("queue {}", (void*) queue));
+            return false;
+        }
+        // Our own views of the game's images: the views it tagged were made for its own use (render target or
+        // sampling) and need not allow shader writes. One set per frame, freed when this slot's work is done.
+        if (s.done && vkGetFenceStatus(device, s.done) != VK_SUCCESS)
+        {
+            Diag("hudless: slot still busy");
+            return false;
+        }
+        for (auto view : s.views)
+            vkDestroyImageView(device, view, nullptr);
+        s.views.clear();
+        auto makeView = [&](const HudlessVk::Image& image, VkImageUsageFlags usage)
+        {
+            VkImageViewUsageCreateInfo usageInfo { VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO };
+            usageInfo.usage = usage;
+            VkImageViewCreateInfo vi { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            vi.pNext = &usageInfo;
+            vi.image = image.image;
+            vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vi.format = image.format;
+            vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            VkImageView view = VK_NULL_HANDLE;
+            if (vkCreateImageView(device, &vi, nullptr, &view) != VK_SUCCESS)
+                return VkImageView(VK_NULL_HANDLE);
+            s.views.push_back(view);
+            return view;
+        };
+        const VkImageView hView = makeView(h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+        const VkImageView uiView = makeView(ui, VK_IMAGE_USAGE_SAMPLED_BIT);
+        const VkImageView bbView = makeView(bb, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+        if (!hView || !uiView || !bbView)
+        {
+            Diag("hudless: could not create views of the game's pictures");
+            Say("Could not access the game's HUD-less picture.");
+            return false;
+        }
+        const uint32_t family = presentFamilyIt->second;
+        VkCommandPool pool = s.pool;
+        VkCommandBuffer cmd = s.cmd;
+        if (family != s.family)
+        {
+            if (s.presentPool && s.presentFamily != family)
+            {
+                vkDestroyCommandPool(device, s.presentPool, nullptr);
+                s.presentPool = VK_NULL_HANDLE;
+                s.presentCmd = VK_NULL_HANDLE;
+            }
+            if (!s.presentPool)
+            {
+                VkCommandPoolCreateInfo pi { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+                pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+                pi.queueFamilyIndex = family;
+                VkCommandBufferAllocateInfo ai { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+                ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                ai.commandBufferCount = 1;
+                if (vkCreateCommandPool(device, &pi, nullptr, &s.presentPool) != VK_SUCCESS)
+                    return false;
+                ai.commandPool = s.presentPool;
+                if (vkAllocateCommandBuffers(device, &ai, &s.presentCmd) != VK_SUCCESS)
+                {
+                    vkDestroyCommandPool(device, s.presentPool, nullptr);
+                    s.presentPool = VK_NULL_HANDLE;
+                    return false;
+                }
+                s.presentFamily = family;
+            }
+            pool = s.presentPool;
+            cmd = s.presentCmd;
+        }
+        auto ensure = [&](ImageVk& image, VkFormat format)
+        {
+            const bool existed = image.Valid() && image.info.Width == size.width && image.info.Height == size.height &&
+                                 image.info.Format == format;
+            if (!existed && image.Valid())
+            {
+                // Recreated only on a size change; the previous frame's work must be finished first.
+                if (s.done && vkWaitForFences(device, 1, &s.done, VK_TRUE, 1000000000) != VK_SUCCESS)
+                    return false;
+                hud.historyValid = false;
+            }
+            return image.Ensure(device, physical, size.width, size.height, format);
+        };
+        if (!ensure(hud.input, h.format) || !ensure(hud.nr, VK_FORMAT_R16G16B16A16_SFLOAT))
+        {
+            Diag("hudless: work images could not be created");
+            return false;
+        }
+        const uint32_t index = present->pImageIndices[0];
+        if (hud.ready.size() <= index)
+            hud.ready.resize(std::max<size_t>(index + 1, 8), VK_NULL_HANDLE);
+        if (!hud.ready[index])
+        {
+            VkSemaphoreCreateInfo ci { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+            if (vkCreateSemaphore(device, &ci, nullptr, &hud.ready[index]) != VK_SUCCESS)
+                return false;
+        }
+        if (vkResetCommandPool(device, pool, 0) != VK_SUCCESS)
+            return false;
+        VkCommandBufferBeginInfo bi { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS)
+            return false;
+        const uint32_t query = static_cast<uint32_t>(&s - slots.data()) * 2;
+        if (queryPool)
+        {
+            uint64_t ticks[2] {};
+            if (s.timed && vkGetQueryPoolResults(device, queryPool, query, 2, sizeof(ticks), ticks, sizeof(uint64_t),
+                                                 VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+                ticks[1] > ticks[0])
+            {
+                const double ms = (double) (ticks[1] - ticks[0]) * timestampPeriod / 1e6;
+                if (ms < 1000.0)
+                {
+                    presentGpuMs += ms;
+                    presentGpuMaxMs = std::max(presentGpuMaxMs, ms);
+                    ++presentGpuSamples;
+                }
+            }
+            s.timed = false;
+            vkCmdResetQueryPool(cmd, queryPool, query, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, query);
+        }
+        // The game's pictures stay in the layout it tagged them in (GENERAL); full barriers make its writes visible.
+        Transition(cmd, h.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, ui.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        // The game hands the backbuffer over for presenting.
+        Transition(cmd, bb.image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, hud.input, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        {
+            VkImageCopy region {};
+            region.srcSubresource = region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            region.extent = { size.width, size.height, 1 };
+            vkCmdCopyImage(cmd, h.image, VK_IMAGE_LAYOUT_GENERAL, hud.input.info.Image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        }
+        Transition(cmd, hud.input, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, hud.nr, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, s.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(cmd, s.motion, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        auto frame = s.frame;
+        frame.ColourIsLinearHdr = false; // tone mapped, display-referred 8-bit
+        frame.WhitePointOverride = 0.0f;
+        bool ran = false;
+        shader.Dispatch(cmd, hud.input.info, s.depth.info, s.motion.info, hud.nr.info, frame, s.instance,
+                        VK_IMAGE_LAYOUT_GENERAL, &ran);
+        bool applied = false;
+        if (ran && cfg.DlssNrApplyModel.value_or_default())
+        {
+            ImageVk* edited = &hud.nr;
+            const auto settings = HudlessTemporal::ReadSettings(cfg);
+            if (settings.Active() && shader.HudlessTemporalReady() && ensure(hud.adjusted, VK_FORMAT_R16G16B16A16_SFLOAT))
+            {
+                bool historyReady = true;
+                for (auto& history : hud.history)
+                {
+                    if (!history.Valid())
+                        hud.historyValid = false;
+                    historyReady &= ensure(history, VK_FORMAT_R16G16B16A16_SFLOAT);
+                }
+                if (historyReady)
+                {
+                    const auto& f = s.frame;
+                    const auto guide = GuideSubrect({ s.motion.info.Width, s.motion.info.Height },
+                                                    f.MotionVectorsLowResolution
+                                                        ? GuideExtent { f.RenderSubrectWidth, f.RenderSubrectHeight }
+                                                        : GuideExtent { size.width, size.height },
+                                                    f.MotionSubrectBaseX, f.MotionSubrectBaseY);
+                    HudlessTemporal::Constants c {};
+                    c.width = size.width;
+                    c.height = size.height;
+                    c.guideX = guide.x;
+                    c.guideY = guide.y;
+                    c.guideWidth = guide.width;
+                    c.guideHeight = guide.height;
+                    c.mvToOutX = guide.width ? f.MvScaleX * float(size.width) / float(guide.width) : 0.0f;
+                    c.mvToOutY = guide.height ? f.MvScaleY * float(size.height) / float(guide.height) : 0.0f;
+                    c.smoothing = settings.smoothing ? 1u : 0u;
+                    c.historyValid = hud.historyValid && settings.smoothing && !f.Reset;
+                    c.currentWeight = 1.0f / settings.frames;
+                    c.tolerance = settings.tolerance;
+                    c.adaptive = settings.adaptive ? 1u : 0u;
+                    c.stillStrength = settings.stillStrength;
+                    c.motionStrength = settings.motionStrength;
+                    c.motionStart = settings.motionStart;
+                    c.motionFull = settings.motionFull;
+                    c.debugView = (unsigned) settings.debugView;
+                    c.reject = settings.reject;
+                    c.bandSplit = settings.bandSplit ? 1u : 0u;
+                    const unsigned next = hud.historyIndex ^ 1u;
+                    Transition(cmd, hud.input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    Transition(cmd, hud.history[hud.historyIndex], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    Transition(cmd, hud.history[next], VK_IMAGE_LAYOUT_GENERAL);
+                    Transition(cmd, hud.adjusted, VK_IMAGE_LAYOUT_GENERAL);
+                    if (guide.valid() &&
+                        shader.DispatchHudlessTemporal(cmd, c, hud.nr.info.ImageView, VK_IMAGE_LAYOUT_GENERAL,
+                                                       hud.input.info.ImageView,
+                                                       hud.history[hud.historyIndex].info.ImageView,
+                                                       s.motion.info.ImageView, hud.history[next].info.ImageView,
+                                                       hud.adjusted.info.ImageView))
+                    {
+                        edited = &hud.adjusted;
+                        hud.historyIndex = next;
+                        hud.historyValid = settings.smoothing;
+                    }
+                    else
+                        hud.historyValid = false;
+                }
+                else
+                    hud.historyValid = false;
+            }
+            else
+                hud.historyValid = false;
+            // NR's change into the shown picture, only where the UI layer leaves the scene visible (its alpha).
+            Transition(cmd, *edited, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmd, hud.input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            DlssNrConstants blend {};
+            blend.Mode = 10;
+            blend.Width = size.width;
+            blend.Height = size.height;
+            blend.DebugView = 2; // UI coverage in alpha
+            const bool composed = shader.Dispatch(cmd, blend, size.width, size.height, bbView, edited->info.ImageView,
+                                                  hud.input.info.ImageView, uiView, bbView, bbView,
+                                                  VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, true);
+            // Frame generation interpolates the NR picture: it replaces the game's HUD-less picture.
+            DlssNrConstants copy {};
+            copy.Mode = DlssNrMode_Downsample;
+            copy.Width = size.width;
+            copy.Height = size.height;
+            const bool handed = composed && shader.Dispatch(cmd, copy, size.width, size.height, edited->info.ImageView,
+                                                            VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, hView,
+                                                            hView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            applied = composed && handed;
+        }
+        else
+            hud.historyValid = false;
+        Transition(cmd, h.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        Transition(cmd, bb.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        if (queryPool)
+        {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, query + 1);
+            s.timed = true;
+        }
+        if (vkEndCommandBuffer(cmd) != VK_SUCCESS || vkResetFences(device, 1, &s.done) != VK_SUCCESS)
+            return false;
+        std::vector<VkPipelineStageFlags> stages(present->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        VkSubmitInfo submit { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit.waitSemaphoreCount = present->waitSemaphoreCount;
+        submit.pWaitSemaphores = present->pWaitSemaphores;
+        submit.pWaitDstStageMask = stages.data();
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        submit.signalSemaphoreCount = 1;
+        submit.pSignalSemaphores = &hud.ready[index];
+        if (vkQueueSubmit(queue, 1, &submit, s.done) != VK_SUCCESS)
+        {
+            Say("Vulkan HUD-less submission failed.");
+            return false;
+        }
+        for (auto& old : slots)
+            if (old.submitted && old.serial <= s.serial)
+                old.pending = false;
+        present->waitSemaphoreCount = 1;
+        present->pWaitSemaphores = &hud.ready[index];
+        Say(applied ? "Applying NR to the HUD-less Vulkan picture; HUD kept."
+                    : "Preparing NR for the HUD-less Vulkan picture.");
+        if (applied && (++hud.frames == 1 || hud.frames % 300 == 0))
+            LOG_INFO("DLSS-NR Vulkan HUD-less finished picture: {} frames, {}x{}, smoothing history {}", hud.frames,
+                     size.width, size.height, hud.historyValid);
+        return true;
+    }
 };
 FinishedVk::FinishedVk(DlssNr_Vk& shader, VkDevice device, VkPhysicalDevice physical)
     : impl(std::make_unique<Impl>(shader, device, physical))
@@ -772,6 +1159,11 @@ void FinishedVk::ResetPool(VkCommandPool pool)
         }
 }
 bool FinishedVk::Present(VkQueue queue, VkPresentInfoKHR* present) { return impl->Present(queue, present); }
+bool FinishedVk::PresentHudless(VkQueue queue, VkPresentInfoKHR* present, const HudlessVk::Frame* frame,
+                                PFN_vkGetSwapchainImagesKHR swapchainImages)
+{
+    return impl->PresentHudless(queue, present, frame, swapchainImages);
+}
 void FinishedVkSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info)
 {
     if (State::Instance().isShuttingDown)
@@ -923,6 +1315,24 @@ void FinishedVkPresent(VkQueue queue, VkPresentInfoKHR* present)
     ++presentEpoch;
     if (presentEpoch % 600 == 0)
         DiagSummary();
+}
+bool FinishedVkPresentHudless(VkQueue queue, VkPresentInfoKHR* present, const HudlessVk::Frame* frame,
+                              PFN_vkGetSwapchainImagesKHR swapchainImages)
+{
+    if (State::Instance().isShuttingDown)
+        return false;
+    std::lock_guard lock(finishedMutex);
+    const auto& cfg = *Config::Instance();
+    if (!cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrFinishedPicture.value_or_default() ||
+        !cfg.DlssNrFinishedHudless.value_or_default())
+    {
+        hudlessSeen = false;
+        return false;
+    }
+    for (auto* owner : owners)
+        if (owner->PresentHudless(queue, present, frame, swapchainImages))
+            return true;
+    return false;
 }
 void FinishedVkDiagnostic(const char* key)
 {

@@ -983,6 +983,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_FinishedReady.h" />
     <ClInclude Include="dlssnr\DlssNr_StreamlinePicture.h" />
     <ClCompile Include="dlssnr\DlssNr_StreamlinePicture.cpp" />
+    <ClInclude Include="dlssnr\DlssNr_StreamlinePictureVk.h" />
+    <ClCompile Include="dlssnr\DlssNr_StreamlinePictureVk.cpp" />
+    <ClInclude Include="dlssnr\DlssNr_HudlessVk.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dlssnr\DlssNr_NgxDiagnostics.cpp" />

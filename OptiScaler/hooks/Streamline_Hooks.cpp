@@ -6,6 +6,8 @@
 #endif
 #include <dlssnr/DlssNr_StreamlinePicture.h>
 #include <dlssnr/DlssNr_Hudless.h>
+#include <dlssnr/DlssNr_HudlessVk.h>
+#include <dlssnr/DlssNr_StreamlinePictureVk.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -394,7 +396,8 @@ sl::Result StreamlineHooks::hkslGetFeatureFunction(sl::Feature feature, const ch
     return o_slGetFeatureFunction(feature, functionName, function);
 }
 
-static void TraceTags(const char* api, uint32_t frame, const sl::ResourceTag* tags, uint32_t numTags, void* cmdBuffer)
+static void TraceTags(const char* api, uint32_t frame, const sl::ResourceTag* tags, uint32_t numTags, void* cmdBuffer,
+                      bool vulkan = false)
 {
     if (!PipelineOrderTrace::Active() || tags == nullptr)
         return;
@@ -402,6 +405,18 @@ static void TraceTags(const char* api, uint32_t frame, const sl::ResourceTag* ta
     for (uint32_t i = 0; i < numTags; i++)
     {
         auto native = tags[i].resource != nullptr ? tags[i].resource->native : nullptr;
+        if (vulkan)
+        {
+            // Vulkan: no native description to read; Streamline's own fields carry size, format and usage.
+            const auto* r = tags[i].resource;
+            LOG_INFO("PipelineOrder: {} frame {} tag {} ({}) = VkImage {} view {} {}x{} format {} usage 0x{:X} layout {}, "
+                     "lifecycle {}, extent {}x{}+{}+{}, cmd buffer {}",
+                     api, frame, magic_enum::enum_name((BufferType) tags[i].type), (uint32_t) tags[i].type, native,
+                     r ? r->view : nullptr, r ? r->width : 0, r ? r->height : 0, r ? r->nativeFormat : 0, r ? r->usage : 0,
+                     r ? r->state : 0, (int) tags[i].lifecycle, tags[i].extent.width, tags[i].extent.height,
+                     tags[i].extent.left, tags[i].extent.top, cmdBuffer != nullptr ? "yes" : "no");
+            continue;
+        }
         LOG_INFO("PipelineOrder: {} frame {} tag {} ({}) = {}, state 0x{:X}, lifecycle {}, extent {}x{}+{}+{}, cmd list {}",
                  api, frame, magic_enum::enum_name((BufferType) tags[i].type), (uint32_t) tags[i].type,
                  PipelineOrderTrace::Describe(native),
@@ -414,9 +429,15 @@ static void TraceTags(const char* api, uint32_t frame, const sl::ResourceTag* ta
 sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
                                        uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
+    if (renderApi == sl::RenderAPI::eVulkan)
+        TraceTags("slSetTag", 0, tags, numTags, cmdBuffer, true);
+    if (renderApi == sl::RenderAPI::eVulkan)
+        DlssNr::HudlessVk::Record(tags, numTags);
     if (renderApi == sl::RenderAPI::eD3D11 || renderApi == sl::RenderAPI::eVulkan)
     {
-        LOG_ERROR("hkslSetTag only supports DX12");
+        // Vulkan tags are recorded above for NR's HUD-less picture; the rest of this hook is D3D12 only.
+        if (renderApi == sl::RenderAPI::eD3D11)
+            LOG_ERROR("hkslSetTag only supports DX12");
         return o_slSetTag(viewport, tags, numTags, cmdBuffer);
     }
 
@@ -508,9 +529,15 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
                                                const sl::ResourceTag* resources, uint32_t numResources,
                                                sl::CommandBuffer* cmdBuffer)
 {
+    if (renderApi == sl::RenderAPI::eVulkan)
+        TraceTags("slSetTagForFrame", static_cast<uint32_t>(frame), resources, numResources, cmdBuffer, true);
+    if (renderApi == sl::RenderAPI::eVulkan)
+        DlssNr::HudlessVk::Record(resources, numResources);
     if (renderApi == sl::RenderAPI::eD3D11 || renderApi == sl::RenderAPI::eVulkan)
     {
-        LOG_ERROR("hkslSetTagForFrame only supports DX12");
+        // Vulkan tags are recorded above for NR's HUD-less picture; the rest of this hook is D3D12 only.
+        if (renderApi == sl::RenderAPI::eD3D11)
+            LOG_ERROR("hkslSetTagForFrame only supports DX12");
         return o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
     }
 
@@ -2005,6 +2032,7 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
         return;
 
     last_slInterposer = slInterposer;
+    DlssNr::StreamlinePictureVk::HookInterposer(slInterposer);
 
     // Looks like when reading DLL version load methods are called
     // To prevent loops disabling checks for sl.interposer.dll

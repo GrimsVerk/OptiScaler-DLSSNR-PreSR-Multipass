@@ -8,6 +8,7 @@
 #include "precompile/dlssnr_spatial_Shader_Vk.h"
 #include "precompile/dlssnr_denoise_first_Shader_Vk.h"
 #include "precompile/dlssnr_spatial_guides_Shader_Vk.h"
+#include "precompile/dlssnr_hudless_temporal_Shader_Vk.h"
 #include <dlssnr/DlssNrFinished_Vk.h>
 
 #include <algorithm>
@@ -114,6 +115,10 @@ DlssNr_Vk::DlssNr_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InP
                                        dlssnr_denoise_first_spv + sizeof(dlssnr_denoise_first_spv));
     if (!CreateComputePipeline(_device, _pipelineLayout, &_denoiseFirstPipeline, denoiseFirstCode))
         LOG_WARN("DLSS-NR Vulkan: denoise-first edit shader unavailable");
+    std::vector<char> hudlessTemporalCode(dlssnr_hudless_temporal_spv,
+                                          dlssnr_hudless_temporal_spv + sizeof(dlssnr_hudless_temporal_spv));
+    if (!CreateComputePipeline(_device, _pipelineLayout, &_hudlessTemporalPipeline, hudlessTemporalCode))
+        LOG_WARN("DLSS-NR Vulkan: HUD-less smoothing shader unavailable; HUD-less NR runs without it");
     _init = true;
     LOG_INFO("DLSS-NR Vulkan pass up: {} constant slots, stride {}", kSlots, (uint64_t) _slotStride);
 }
@@ -136,6 +141,8 @@ DlssNr_Vk::~DlssNr_Vk()
         vkDestroyPipeline(_device, _spatialGuidesPipeline, nullptr);
     if (_denoiseFirstPipeline)
         vkDestroyPipeline(_device, _denoiseFirstPipeline, nullptr);
+    if (_hudlessTemporalPipeline)
+        vkDestroyPipeline(_device, _hudlessTemporalPipeline, nullptr);
     _dummy.Destroy(_device);
 }
 

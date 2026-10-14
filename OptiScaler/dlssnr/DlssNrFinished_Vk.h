@@ -5,6 +5,10 @@
 
 namespace DlssNr
 {
+namespace HudlessVk
+{
+struct Frame;
+}
 // Per-upscaler presentation state. Global entry points only dispatch to live owners.
 class FinishedVk
 {
@@ -20,6 +24,8 @@ class FinishedVk
     void Reset(VkCommandBuffer cmd);
     void ResetPool(VkCommandPool pool);
     bool Present(VkQueue queue, VkPresentInfoKHR* present);
+    bool PresentHudless(VkQueue queue, VkPresentInfoKHR* present, const HudlessVk::Frame* frame,
+                        PFN_vkGetSwapchainImagesKHR swapchainImages);
 };
 void FinishedVkSwapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info);
 // A compute queue of OptiScaler's own, added at device creation, so the present-time work overlaps the game's next
@@ -39,6 +45,11 @@ void FinishedVkSubmitted(VkQueue queue, VkCommandBuffer cmd);
 void FinishedVkReset(VkCommandBuffer cmd);
 void FinishedVkResetPool(VkCommandPool pool);
 void FinishedVkPresent(VkQueue queue, VkPresentInfoKHR* present);
+// Finished picture without the HUD, from the DLSS-G plugin's present hook (before frame generation). frame is
+// null when the game tagged nothing since the last present. Returns true when the present now waits for NR.
+// swapchainImages: Streamline's own vkGetSwapchainImagesKHR (its proxy images, the ones the game renders into).
+bool FinishedVkPresentHudless(VkQueue queue, VkPresentInfoKHR* present, const HudlessVk::Frame* frame,
+                              PFN_vkGetSwapchainImagesKHR swapchainImages);
 std::string FinishedVkStatus();
 // Records a finished-picture diagnostic event when [DlssNr] FinishedDiagnostics is on.
 void FinishedVkDiagnostic(const char* key);

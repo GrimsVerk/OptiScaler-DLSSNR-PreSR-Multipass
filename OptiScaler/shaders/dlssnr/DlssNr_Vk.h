@@ -26,6 +26,8 @@
 #include <shaders/Shader_Vk.h>
 #include "DlssNr_Common.h"
 #include "DlssNr_Spatial.h"
+#include "DlssNr_HudlessTemporal.h"
+#include <cstring>
 #include <dlssnr/DlssNr_Image_Vk.h>
 #include <memory>
 #include <mutex>
@@ -65,6 +67,7 @@ class DlssNr_Vk : public Shader_Vk
     VkPipeline _spatialPipeline = VK_NULL_HANDLE;
     VkPipeline _spatialGuidesPipeline = VK_NULL_HANDLE;
     VkPipeline _denoiseFirstPipeline = VK_NULL_HANDLE;
+    VkPipeline _hudlessTemporalPipeline = VK_NULL_HANDLE;
     VkImageLayout _intermediateLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkDeviceSize _slotStride = 0; // sizeof(DlssNrConstants), rounded up to the device's alignment
@@ -126,6 +129,22 @@ class DlssNr_Vk : public Shader_Vk
                   VkImageLayout InMotionLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, bool finishedColor = false,
                   // Initialize to UINT32_MAX; identical bindings/constants within one model chain only.
                   uint32_t* immutableSlot = nullptr, VkPipeline pipelineOverride = VK_NULL_HANDLE);
+
+    // HUD-less finished picture: smoothing and motion-adaptive strength of NR's change
+    // (precompile/dlssnr_hudless_temporal.hlsl, Vulkan build). Reads: NR output, the HUD-less picture before NR,
+    // the previous history, motion. Writes: the new history and the adjusted picture.
+    bool HudlessTemporalReady() const { return _hudlessTemporalPipeline != VK_NULL_HANDLE; }
+    bool DispatchHudlessTemporal(VkCommandBuffer cmd, const DlssNr::HudlessTemporal::Constants& constants,
+                                 VkImageView nr, VkImageLayout nrLayout, VkImageView input, VkImageView history,
+                                 VkImageView motion, VkImageView historyOut, VkImageView output)
+    {
+        static_assert(sizeof(DlssNr::HudlessTemporal::Constants) == sizeof(DlssNrConstants));
+        DlssNrConstants bytes {};
+        std::memcpy(&bytes, &constants, sizeof(bytes));
+        return Dispatch(cmd, bytes, constants.width, constants.height, nr, input, history, motion, historyOut,
+                        output, nrLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, nullptr,
+                        _hudlessTemporalPipeline);
+    }
 
     // Denoise first, edit step: raw render (source) + NR's edit of the clean 1:1 image (model over
     // original), resampled onto the raw jitter, written to target. Same bindings as the main pass.

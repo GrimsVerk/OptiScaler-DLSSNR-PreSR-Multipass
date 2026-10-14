@@ -12,6 +12,7 @@
 
 #include <misc/FrameLimit.h>
 #include "Reflex_Hooks.h"
+#include "PipelineOrderTrace.h"
 
 #include <spoofing/Vulkan_Spoofing.h>
 
@@ -317,6 +318,8 @@ VALIDATE_HOOK(hkvkQueuePresentKHR, PFN_vkQueuePresentKHR)
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
     LOG_FUNC();
+
+    PipelineOrderTrace::OnPresent("vkQueuePresentKHR", 0);
 
     // get upscaler time
     UpscalerTimeVk::ReadUpscalingTime(_device);
