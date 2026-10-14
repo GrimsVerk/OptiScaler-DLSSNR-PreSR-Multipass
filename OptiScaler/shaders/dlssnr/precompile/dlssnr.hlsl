@@ -675,11 +675,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
 
         // Exact area-weighted downsampling avoids the aliasing of a single bilinear tap.
         // Adapted from hhkbble's multi-pass contribution.
-        const float x0 = ((float) id.x * (float) srcW) / (float) gWidth;
-        const float x1 = ((float) (id.x + 1) * (float) srcW) / (float) gWidth;
-        const float y0 = ((float) id.y * (float) srcH) / (float) gHeight;
-        const float y1 = ((float) (id.y + 1) * (float) srcH) / (float) gHeight;
-        const float area = (x1 - x0) * (y1 - y0);
+        // WorkJitter (gReserved == 1): the footprint is shifted by a sub-pixel amount in output pixels.
+        const float2 jit = gReserved == 1u ? float2(asfloat(gResidualMotionBaseXUnused), asfloat(gResidualMotionBaseYUnused)) : 0.0;
+        const float x0 = (((float) id.x + jit.x) * (float) srcW) / (float) gWidth;
+        const float x1 = (((float) (id.x + 1) + jit.x) * (float) srcW) / (float) gWidth;
+        const float y0 = (((float) id.y + jit.y) * (float) srcH) / (float) gHeight;
+        const float y1 = (((float) (id.y + 1) + jit.y) * (float) srcH) / (float) gHeight;
+        const float areaJ = (x1 - x0) * (y1 - y0);
 
         const int i0 = (int) floor(x0);
         const int i1 = (int) ceil(x1) - 1;
@@ -704,10 +706,36 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
             }
         }
 
-        const int acx = clamp((int) floor(((float) id.x + 0.5) * (float) srcW / (float) gWidth), 0, (int) srcW - 1);
-        const int acy = clamp((int) floor(((float) id.y + 0.5) * (float) srcH / (float) gHeight), 0, (int) srcH - 1);
+        const int acx = clamp((int) floor(((float) id.x + 0.5 + jit.x) * (float) srcW / (float) gWidth), 0, (int) srcW - 1);
+        const int acy = clamp((int) floor(((float) id.y + 0.5 + jit.y) * (float) srcH / (float) gHeight), 0, (int) srcH - 1);
 
-        gTarget[id.xy] = float4(acc / area, gSource.Load(int3(acx, acy, 0)).a);
+        gTarget[id.xy] = float4(acc / areaJ, gSource.Load(int3(acx, acy, 0)).a);
+        return;
+    }
+
+    if (gMode == 13)
+    {
+        // Transfer 5, two-pass: the guided filter (He et al.) between the low-res proxy luma and the low-res edit,
+        // fitted once per low-res texel over its 3x3 window. a -> u0, b -> u1; the resolve samples both bilinearly.
+        uint lw, lh;
+        gSource.GetDimensions(lw, lh);
+        if (id.x >= lw || id.y >= lh)
+            return;
+        const int2 lowSize = int2(lw, lh);
+        float mg = 0, mgg = 0; float3 me = 0, mge = 0;
+        [unroll] for (int j = -1; j <= 1; ++j)
+            [unroll] for (int i = -1; i <= 1; ++i)
+            {
+                const int2 q = clamp(int2(id.xy) + int2(i, j), int2(0, 0), lowSize - 1);
+                const float3 pr = gPassthrough != 0 ? gSource.Load(int3(q, 0)).rgb : SrgbToLinear(gSource.Load(int3(q, 0)).rgb);
+                const float3 mo = gPassthrough != 0 ? gModel.Load(int3(q, 0)).rgb : SrgbToLinear(gModel.Load(int3(q, 0)).rgb);
+                const float g = dot(pr, kLuma); const float3 e = mo - pr;
+                mg += g; mgg += g * g; me += e; mge += g * e;
+            }
+        mg /= 9.0; mgg /= 9.0; me /= 9.0; mge /= 9.0;
+        const float3 a = clamp((mge - mg * me) / (mgg - mg * mg + 1e-4), -1000.0, 1000.0);
+        gTarget[id.xy] = float4(a, 1.0);
+        gKeep[id.xy] = float4(clamp(me - a * mg, -1000.0, 1000.0), 1.0);
         return;
     }
 
@@ -799,8 +827,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
 
     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
-    float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
-    float4 modelSample = gModel.SampleLevel(gLinear, cmpUv, 0);
+    // WorkJitter (gReserved == 1): the reduced proxy and model answer were made from a shifted footprint;
+    // read them back at the same shift so the edit lands where it belongs.
+    uint lowW0, lowH0;
+    gSource.GetDimensions(lowW0, lowH0);
+    const float2 jitUv = gReserved == 1u ? float2(asfloat(gResidualMotionBaseXUnused), asfloat(gResidualMotionBaseYUnused)) / float2(lowW0, lowH0) : 0.0;
+    float4 proxySample = gSource.SampleLevel(gLinear, cmpUv - jitUv, 0);
+    float4 modelSample = gModel.SampleLevel(gLinear, cmpUv - jitUv, 0);
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
     float3 proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
@@ -882,7 +915,62 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     // Rebuild the full-resolution proxy and add only the upsampled model difference.
     // Skip ordinary matched residual at native resolution to preserve Classic's exact arithmetic.
     // Residual transfer and cube scaling are adapted from hhkbble's multi-pass contribution.
-    if ((gTransfer == 1 && modelRanSmall) || gTransfer == 2)
+    // Guided residual (Transfer 5): instead of reading the edit bilinearly between low-res texels, fit a guided
+    // filter (He et al.) in each texel's 3x3 window -- edit = a * proxyLuma + b, per channel -- and apply the
+    // bilinearly blended a, b to the FULL-resolution proxy luma, so the enlarged edit follows the frame's own edges.
+    if (gTransfer == 5 && modelRanSmall && gReserved == 2u)
+    {
+        // Two-pass: a and b were fitted per low-res texel (mode 13) and sit in the proxy / answer slots.
+        const float3 fullProxyG = gPassthrough != 0
+                                      ? saturate(original)
+                                      : (gReversibleMode == 0   ? saturate(SoftKnee(original))
+                                         : gReversibleMode >= 3 ? HybridEncode(original)
+                                                                : NeutwoEncode(original));
+        edit = proxySample.rgb * dot(fullProxyG, kLuma) + modelSample.rgb;
+    }
+    else if (gTransfer == 5 && modelRanSmall)
+    {
+        const float eps = 1e-4;
+        const int2 lowSize = int2(proxyW, proxyH);
+        const float2 lp = (cmpUv - jitUv) * float2(lowSize) - 0.5;
+        const int2 base = int2(floor(lp));
+        const float2 fr = lp - float2(base);
+        // The four texels' 3x3 windows together cover one 4x4 block: load it once (16 taps per texture instead of
+        // 36) and form the four window sums from it.
+        float bg[16]; float3 be[16];
+        [unroll] for (int n = 0; n < 16; ++n)
+        {
+            const int2 q = clamp(base + int2((n & 3) - 1, (n >> 2) - 1), int2(0, 0), lowSize - 1);
+            const float3 pr = gPassthrough != 0 ? gSource.Load(int3(q, 0)).rgb : SrgbToLinear(gSource.Load(int3(q, 0)).rgb);
+            const float3 mo = gPassthrough != 0 ? gModel.Load(int3(q, 0)).rgb : SrgbToLinear(gModel.Load(int3(q, 0)).rgb);
+            bg[n] = dot(pr, kLuma); be[n] = mo - pr;
+        }
+        float3 ga[4], gb[4];
+        [unroll] for (int k = 0; k < 4; ++k)
+        {
+            float mg = 0, mgg = 0; float3 me = 0, mge = 0;
+            [unroll] for (int j = 0; j < 3; ++j)
+                [unroll] for (int i = 0; i < 3; ++i)
+                {
+                    const int n = ((k >> 1) + j) * 4 + (k & 1) + i;
+                    const float g = bg[n]; const float3 e = be[n];
+                    mg += g; mgg += g * g; me += e; mge += g * e;
+                }
+            mg /= 9.0; mgg /= 9.0; me /= 9.0; mge /= 9.0;
+            const float3 a = (mge - mg * me) / (mgg - mg * mg + eps);
+            ga[k] = a; gb[k] = me - a * mg;
+        }
+        const float3 aa = lerp(lerp(ga[0], ga[1], fr.x), lerp(ga[2], ga[3], fr.x), fr.y);
+        const float3 bb = lerp(lerp(gb[0], gb[1], fr.x), lerp(gb[2], gb[3], fr.x), fr.y);
+        const float3 fullProxyG = gPassthrough != 0
+                                      ? saturate(original)
+                                      : (gReversibleMode == 0   ? saturate(SoftKnee(original))
+                                         : gReversibleMode >= 3 ? HybridEncode(original)
+                                                                : NeutwoEncode(original));
+        edit = aa * dot(fullProxyG, kLuma) + bb;
+    }
+
+    if ((gTransfer == 1 && modelRanSmall) || gTransfer == 2 || (gTransfer == 5 && modelRanSmall))
     {
         // Match the encode's curve, passthrough and saturation before cube-scaling the residual.
         // An out-of-range reconstructed proxy would collapse the residual scale to zero.

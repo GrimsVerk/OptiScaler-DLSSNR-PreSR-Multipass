@@ -375,6 +375,12 @@ class Config
 
     // Model width/height scale; composition remains at the input size.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
+    // Experimental (design N): shift the reduced-size model input by a sub-pixel jitter that changes every frame
+    // (8-phase Halton, low-res pixels) and read the edit back at the same shift, so temporal smoothing integrates
+    // the phases into a finer edit. Only when the model runs below full size; Transfer 1 and 5.
+    CustomOptional<bool> DlssNrWorkJitter { false };
+    // Transfer 5: fit the guided filter in a separate low-res pass (cheaper); false = fit inside the resolve.
+    CustomOptional<bool> DlssNrGuidedTwoPass { true };
 
     CustomOptional<bool> DlssNrSpatialCompression { false };
     CustomOptional<float> DlssNrSpatialCenterX { 80.0f };

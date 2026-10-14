@@ -381,6 +381,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
+            DlssNrWorkJitter.set_from_config(readBool("DlssNr", "WorkJitter"));
+            DlssNrGuidedTwoPass.set_from_config(readBool("DlssNr", "GuidedTwoPass"));
             DlssNrSpatialCompression.set_from_config(readBool("DlssNr", "SpatialCompression"));
             DlssNrSpatialCenterX.set_from_config(readFloat("DlssNr", "SpatialCenterX"));
             DlssNrSpatialCenterY.set_from_config(readFloat("DlssNr", "SpatialCenterY"));
@@ -1444,6 +1446,7 @@ bool Config::SaveIni(std::filesystem::path destination)
                      GetFloatValue(Instance()->DlssNrEnvironmentColour.value_for_config()).c_str());
         ini.SetValue("DlssNr", "ShowSkinMask", GetBoolValue(Instance()->DlssNrShowSkinMask.value_for_config()).c_str());
         ini.SetValue("DlssNr", "UnlockPasses", GetBoolValue(Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "WorkJitter", GetBoolValue(Instance()->DlssNrWorkJitter.value_for_config()).c_str());
         ini.SetValue("DlssNr", "UnlockStrengths",
                      GetBoolValue(Instance()->DlssNrUnlockStrengths.value_for_config()).c_str());
         for (unsigned int i = 0; i < std::size(Instance()->DlssNrPassOverrides); ++i)

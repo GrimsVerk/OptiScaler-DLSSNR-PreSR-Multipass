@@ -40,6 +40,9 @@ struct ModelStateDx12
 
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;
+    // Transfer 5 two-pass: the guided filter's a and b per low-res texel (RGBA16F), read bilinearly by the resolve.
+    ID3D12Resource* guideA = nullptr;
+    ID3D12Resource* guideB = nullptr;
 
     // Peripheral compression keeps a packed model pair and packed guides separate from the
     // ordinary uniform-scale pair consumed by composition and optional DLSS enlargement.
@@ -81,6 +84,11 @@ struct ModelStateDx12
 
     unsigned int workWidth = 0;
     unsigned int workHeight = 0;
+    // WorkJitter (design N): this frame's sub-pixel shift of the reduced model input, in low-res pixels;
+    // the resolve reads the edit back at the same shift.
+    unsigned int jitterFrame = 0;
+    bool jitterOn = false;
+    float jitterX = 0.0f, jitterY = 0.0f;
 
     // Cloned unconditionally when running at present, and only for typeless formats otherwise.
     ID3D12Resource* depthClone = nullptr;

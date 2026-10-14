@@ -10,9 +10,11 @@ auto DlssNr_Dx12::State::ArmScreenCapture() -> void
 {
     if (screenCapture.remaining)
         return;
-    if (screenCapture.runs >= 8)
+    // The test harness (HudlessTestControl) sweeps settings in one session and needs more than eight runs.
+    const unsigned limit = Config::Instance()->DlssNrHudlessTestControl.value_or_default() ? 256u : 8u;
+    if (screenCapture.runs >= limit)
     {
-        LOG_WARN("NR screen capture: eight-run limit reached; restart to capture again");
+        LOG_WARN("NR screen capture: {}-run limit reached; restart to capture again", limit);
         return;
     }
     ++screenCapture.runs;

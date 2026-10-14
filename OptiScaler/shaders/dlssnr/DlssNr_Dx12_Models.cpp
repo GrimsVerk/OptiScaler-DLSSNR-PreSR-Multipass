@@ -42,6 +42,8 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
             ParkNrResource(nr.colorCopy);
             ParkNrResource(nr.hdrCopy);
             ParkNrResource(nr.colorSmall);
+            ParkNrResource(nr.guideA);
+            ParkNrResource(nr.guideB);
             ParkNrResource(nr.outputNative);
             ParkNrResource(nr.activeColor);
             nr.passScratchFailed = false;
@@ -106,6 +108,11 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
 
     if (reduced && !spatial && nr.colorSmall == nullptr)
         nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+    if (reduced && !spatial && nr.guideA == nullptr)
+    {
+        nr.guideA = CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, workWidth, workHeight);
+        nr.guideB = CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, workWidth, workHeight);
+    }
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
     if (workScale > 1.0f && !spatial && nr.outputNative == nullptr)

@@ -169,6 +169,24 @@ class Harness
                 cfg.DlssNrApplyModel = number() != 0;
             else if (key == "Enabled")
                 cfg.DlssNrEnabled = number() != 0;
+            else if (key == "UnlockStrengths") // NR stress test: model strengths above 2
+                cfg.DlssNrUnlockStrengths = number() != 0;
+            else if (key == "Intensity")
+                cfg.DlssNrIntensity = number();
+            else if (key == "LocalStructure")
+                cfg.DlssNrLocalStructure = number();
+            else if (key == "LocalTone")
+                cfg.DlssNrLocalTone = number();
+            else if (key == "Transfer") // enlargement mode; 5 = guided residual (experimental)
+                cfg.DlssNrTransfer = (uint32_t) number();
+            else if (key == "WorkingScale") // model resolution (fraction of each axis)
+                cfg.DlssNrWorkingScale = number();
+            else if (key == "SpatialCompression") // the peripheral warp (design B)
+                cfg.DlssNrSpatialCompression = number() != 0;
+            else if (key == "GuidedTwoPass") // Transfer 5: separate low-res coefficient pass
+                cfg.DlssNrGuidedTwoPass = number() != 0;
+            else if (key == "WorkJitter") // design N: sub-pixel jitter of the reduced model input
+                cfg.DlssNrWorkJitter = number() != 0;
             else if (key == "recordBoth")
                 _dual = number() != 0;
             else if (key == "record")

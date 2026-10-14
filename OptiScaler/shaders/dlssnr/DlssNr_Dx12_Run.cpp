@@ -612,9 +612,32 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
+        // Transfer 5 two-pass: fit the guided filter once per low-res texel, then let the resolve read a and b
+        // bilinearly (in the proxy / answer slots) instead of refitting four 3x3 windows at every 4K pixel.
+        const bool guidedTwoPass = enlargementReady && !spatial && reduced && resolveParams.Transfer == 5 &&
+                                   resolveParams.DebugView == 0 && resolveParams.CompareMode == 0 &&
+                                   cfg.DlssNrGuidedTwoPass.value_or_default() && nr.guideA && nr.guideB &&
+                                   resolveProxy == ordinaryProxy && resolveAnswer == ordinaryAnswer;
+        if (guidedTwoPass)
+        {
+            DlssNrConstants coef = resolveParams;
+            coef.Mode = DlssNrMode_GuidedCoefficients;
+            coef.Width = nr.workWidth;
+            coef.Height = nr.workHeight;
+            shader.DispatchPass(cmdList, coef, resolveProxy, resolveAnswer, nullptr, nullptr, nullptr, nr.guideA, nr.guideB);
+            for (auto* g : { nr.guideA, nr.guideB })
+                Barrier(cmdList, g, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            resolveParams.Reserved = 2; // the resolve reads a, b from the proxy / answer slots
+            resolveProxy = nr.guideA;
+            resolveAnswer = nr.guideB;
+        }
+
         const bool resolved =
             enlargementReady && shader.DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer,
                                                     resolveOriginal, encoded.exposure, nullptr, resolveTarget, nullptr);
+        if (guidedTwoPass)
+            for (auto* g : { nr.guideA, nr.guideB })
+                Barrier(cmdList, g, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         compositionSucceeded = resolved;
         if (resizeFieldReadable)
             Barrier(cmdList, enlarger->input.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,

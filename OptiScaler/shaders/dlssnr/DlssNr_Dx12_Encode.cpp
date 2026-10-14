@@ -238,6 +238,20 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
             down.Mode = DlssNrMode_Downsample;
             down.Width = workWidth;
             down.Height = workHeight;
+            // WorkJitter: an 8-phase Halton(2,3) shift in low-res pixels, carried in the constants the
+            // downsample and resolve passes otherwise leave unused (Reserved = 1 switches it on).
+            nr.jitterOn = workScale < 1.0f && Config::Instance()->DlssNrWorkJitter.value_or_default();
+            if (nr.jitterOn)
+            {
+                static const float h2[8] = { .5f, .25f, .75f, .125f, .625f, .375f, .875f, .0625f };
+                static const float h3[8] = { 1 / 3.f, 2 / 3.f, 1 / 9.f, 4 / 9.f, 7 / 9.f, 2 / 9.f, 5 / 9.f, 8 / 9.f };
+                const unsigned phase = nr.jitterFrame++ % 8u;
+                nr.jitterX = h2[phase] - 0.5f;
+                nr.jitterY = h3[phase] - 0.5f;
+                down.Reserved = 1;
+                memcpy(&down.ResidualMotionBaseX, &nr.jitterX, 4);
+                memcpy(&down.ResidualMotionBaseY, &nr.jitterY, 4);
+            }
             shader.DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr, nr.colorSmall, nullptr);
             Barrier(cmdList, nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -281,6 +295,12 @@ DlssNrConstants DlssNr_Dx12::State::MakeResolveConstants(const EncodeContext& co
 
     resolveParams.ReplaceDetailStrength = cfg.DlssNrReplaceDetailStrength.value_or_default();
     resolveParams.ModelWorkScale = context.workScale;
+    if (nr.jitterOn && context.workScale < 1.0f)
+    {
+        resolveParams.Reserved = 1;
+        memcpy(&resolveParams.ResidualMotionBaseX, &nr.jitterX, 4);
+        memcpy(&resolveParams.ResidualMotionBaseY, &nr.jitterY, 4);
+    }
 
     // Report the effective composition settings when they change.
 
@@ -307,7 +327,8 @@ DlssNrConstants DlssNr_Dx12::State::MakeResolveConstants(const EncodeContext& co
                  "{:.1f}x, colour transform {}, transfer {}, model {}x{}, passes {}, debug view {}, compare {}",
                  composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
                  composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
-                 composeNow.residual == 3   ? "lighting + colour"
+                 composeNow.residual == 5   ? "guided residual"
+                 : composeNow.residual == 3 ? "lighting + colour"
                  : composeNow.residual == 1 ? "matched residual"
                                             : "classic",
                  composeNow.workW, composeNow.workH, composeNow.passes, composeNow.debugView, composeNow.compareMode);

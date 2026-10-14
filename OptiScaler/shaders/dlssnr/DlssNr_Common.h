@@ -29,7 +29,8 @@ enum DlssNrMode : uint32_t
     DlssNrMode_Meter = 3,
     DlssNrMode_AutoExposure = 11,
     DlssNrMode_ResizePrivateGuides = 10,
-    DlssNrMode_EncodeResizeField = 12
+    DlssNrMode_EncodeResizeField = 12,
+    DlssNrMode_GuidedCoefficients = 13 // Transfer 5, two-pass: per low-res texel guided-filter a (u0) and b (u1)
 };
 
 inline bool DlssNrUsesDlssEnlargement(uint32_t transfer) { return transfer == 2 || transfer == 4; }
@@ -37,7 +38,8 @@ inline bool DlssNrUsesDlssEnlargement(uint32_t transfer) { return transfer == 2 
 // The spatial mode is used until the caller has supplied an enlarged DLSS carrier.
 inline uint32_t DlssNrSpatialTransfer(uint32_t transfer)
 {
-    return DlssNrUsesDlssEnlargement(transfer) ? transfer - 1 : std::min(transfer, 3u);
+    // 5 = guided residual (experimental): the edit is enlarged with a guided filter instead of bilinearly.
+    return DlssNrUsesDlssEnlargement(transfer) ? transfer - 1 : (transfer == 5 ? 5u : std::min(transfer, 3u));
 }
 
 // Finished-colour shader's exposure-normalised brightness response, -12..12 stops.
