@@ -261,6 +261,9 @@ class Config
     CustomOptional<bool> DlssNrRunBeforeSr { false };
     CustomOptional<bool> DlssNrFinishedPicture { false };
     CustomOptional<bool> DlssNrFinishedHudless { false };
+    // Keep the game's frame generation setting on (so it still hands over its HUD-less picture) but tell
+    // Streamline not to generate frames while HUD-less NR runs.
+    CustomOptional<bool> DlssNrHudlessFrameGenOff { false };
     // HUD-less finished picture: NR strength by on-screen motion, and temporal smoothing of NR's change.
     CustomOptional<bool> DlssNrHudlessMotionAdaptive { false };
     CustomOptional<float> DlssNrHudlessStillStrength { 1.0f };

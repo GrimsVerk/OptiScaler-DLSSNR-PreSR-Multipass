@@ -1342,6 +1342,21 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         }
     }
 
+    // HUD-less NR without frame generation: the game still believes it is on and keeps tagging its HUD-less picture.
+    const bool nrTurnsFgOff = DlssNr::Hudless::FrameGenerationOff(dlssgPotentiallyActive);
+    if (nrTurnsFgOff)
+        newOptions.mode = sl::DLSSGMode::eOff;
+    // Logged on change only: slDLSSGSetOptions runs per frame.
+    static int gameAsked = -1, nrApplied = -1;
+    if ((int) dlssgPotentiallyActive != gameAsked || (int) DlssNr::Hudless::frameGenerationOffApplied.load() != nrApplied)
+    {
+        gameAsked = dlssgPotentiallyActive;
+        nrApplied = DlssNr::Hudless::frameGenerationOffApplied.load();
+        LOG_INFO("DLSS-NR: the game asks for frame generation {}; {}", dlssgPotentiallyActive ? "on" : "off",
+                 nrApplied == 1 ? "kept off for the HUD-less picture (the game's setting stays on)"
+                                : "left to the game");
+    }
+
     state.dlssgLastSetMode = newOptions.mode;
 
     const auto result = o_slDLSSGSetOptions(viewport, newOptions);
@@ -1589,8 +1604,11 @@ void* StreamlineHooks::hkdlss_slGetPluginFunction(const char* functionName)
 
 void* StreamlineHooks::hkdlssg_slGetPluginFunction(const char* functionName)
 {
-    if (auto* hook = DlssNr::StreamlinePicture::Wrap(functionName, o_dlssg_slGetPluginFunction))
-        return hook;
+    auto* nrHook = DlssNr::StreamlinePicture::Wrap(functionName, o_dlssg_slGetPluginFunction);
+    if (strncmp(functionName, "slHook", 6) == 0)
+        LOG_DEBUG("DLSS-G plugin hook requested: {} -> {}", functionName, nrHook ? "NR handoff" : "plugin");
+    if (nrHook)
+        return nrHook;
     // LOG_DEBUG("{}", functionName);
 
     if (strcmp(functionName, "slOnPluginLoad") == 0)
@@ -2104,7 +2122,8 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 
                 if (State::Instance().activeFgInput == FGInput::NvngxFG ||
                     State::Instance().activeFgInput == FGInput::DLSSG || PipelineOrderTrace::Enabled() ||
-                    Config::Instance()->DlssNrEnabled.value_or_default())
+                    Config::Instance()->DlssNrEnabled.value_or_default() ||
+                    Config::Instance()->DlssNrFinishedHudless.value_or_default())
                 {
                     if (o_slSetTag != nullptr)
                         DetourAttach(&(PVOID&) o_slSetTag, hkslSetTag);

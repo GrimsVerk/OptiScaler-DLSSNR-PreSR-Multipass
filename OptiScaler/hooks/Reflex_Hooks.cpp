@@ -24,6 +24,12 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
 #ifdef LOG_REFLEX_CALLS
     LOG_FUNC();
 #endif
+    // Shows that Reflex stays on when NR switches the game's frame generation off.
+    if (pSetSleepModeParams && (pSetSleepModeParams->bLowLatencyMode != _lastSleepParams.bLowLatencyMode ||
+                                pSetSleepModeParams->bLowLatencyBoost != _lastSleepParams.bLowLatencyBoost))
+        LOG_INFO("Reflex set by the game: low latency {}, boost {}", (bool) pSetSleepModeParams->bLowLatencyMode,
+                 (bool) pSetSleepModeParams->bLowLatencyBoost);
+
     // Store for later so we can adjust the fps whenever we want
     memcpy(&_lastSleepParams, pSetSleepModeParams, sizeof(NV_SET_SLEEP_MODE_PARAMS));
     _lastSleepDev = pDev;

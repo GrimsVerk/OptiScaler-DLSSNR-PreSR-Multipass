@@ -7,6 +7,7 @@
 #include <Config.h>
 #include <d3d12.h>
 #include <wrl/client.h>
+#include <atomic>
 #include <mutex>
 #include <sl.h>
 
@@ -40,6 +41,41 @@ inline bool Wanted()
     const auto& cfg = *Config::Instance();
     return cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrFinishedPicture.value_or_default() &&
            cfg.DlssNrFinishedHudless.value_or_default();
+}
+
+// Some games (Alan Wake 2) only make their HUD-less picture while their frame generation setting is on. With this
+// option the game keeps it on, but Streamline is told not to generate frames. Everything else the game turns on for
+// frame generation (Reflex) stays as the game set it.
+inline bool FrameGenerationOffWanted()
+{
+    const auto& cfg = *Config::Instance();
+    return cfg.DlssNrHudlessFrameGenOff.value_or_default() && cfg.DlssNrFinishedPicture.value_or_default() &&
+           cfg.DlssNrFinishedHudless.value_or_default();
+}
+
+// Whether to pass the game's frame generation request on as off. Switching frame generation off behind the game's
+// back while it generates frames can leave the game waiting forever for a generated frame (Alan Wake 2 froze), so a
+// change of the option only takes effect while the game has frame generation off itself (its menus and loading
+// screens). Frame generation then never changes under the game: it stays off when the game turns it back on, or
+// comes back on exactly when the game asks for it.
+inline std::atomic<int> frameGenerationOffApplied { -1 }; // -1: the game has not asked for frame generation yet
+
+inline bool FrameGenerationOff(bool gameWantsFrameGeneration)
+{
+    int off = frameGenerationOffApplied.load();
+    if (off < 0 || !gameWantsFrameGeneration)
+    {
+        off = FrameGenerationOffWanted() ? 1 : 0;
+        frameGenerationOffApplied = off;
+    }
+    return gameWantsFrameGeneration && off == 1;
+}
+
+// The option was changed but waits for the game to switch frame generation off itself.
+inline bool FrameGenerationOffPending()
+{
+    const int off = frameGenerationOffApplied.load();
+    return off >= 0 && (off == 1) != FrameGenerationOffWanted();
 }
 
 inline void Record(const sl::ResourceTag* tags, uint32_t count)

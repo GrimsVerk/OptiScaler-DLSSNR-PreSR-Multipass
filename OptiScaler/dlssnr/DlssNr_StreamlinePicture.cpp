@@ -23,7 +23,11 @@ void RegisterQueue(HRESULT result, bool handled, IUnknown* device, IDXGISwapChai
         return;
     // Keep the application's render queue, not DLSSG's asynchronous presentation queue.
     if (FAILED(result) || !handled || !device || !swapchain)
+    {
+        LOG_INFO("DLSS-NR: no Streamline finished-picture handoff (swapchain result {:X}, handled by DLSS-G {})",
+                 (uint32_t) result, handled);
         return;
+    }
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
     if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&queue))))
     {
@@ -81,7 +85,7 @@ template <bool Local> struct Hooks
                                  IDXGIOutput* output, IDXGISwapChain1** swapchain, bool& skip)
     {
         const auto result = originalCreateHwnd(factory, device, window, desc, fullscreen, output, swapchain, skip);
-        if (SUCCEEDED(result) && skip && swapchain)
+        if (swapchain)
             RegisterQueue(result, skip, device, *swapchain);
         return result;
     }
@@ -89,7 +93,7 @@ template <bool Local> struct Hooks
                                    IDXGISwapChain** swapchain, bool& skip)
     {
         const auto result = originalCreate(factory, device, desc, swapchain, skip);
-        if (SUCCEEDED(result) && skip && swapchain)
+        if (swapchain)
             RegisterQueue(result, skip, device, *swapchain);
         return result;
     }
@@ -101,7 +105,8 @@ template <bool Local> struct Hooks
         const bool present = std::strcmp(name, "slHookPresent") == 0;
         const bool present1 = std::strcmp(name, "slHookPresent1") == 0;
         const bool createHwnd = std::strcmp(name, "slHookCreateSwapChainForHwnd") == 0;
-        const bool create = Local && std::strcmp(name, "slHookCreateSwapChain") == 0;
+        // Alan Wake 2 creates its swapchain with the older IDXGIFactory::CreateSwapChain.
+        const bool create = std::strcmp(name, "slHookCreateSwapChain") == 0;
         if (!present && !present1 && !createHwnd && !create)
             return nullptr;
         auto* function = getFunction(name);

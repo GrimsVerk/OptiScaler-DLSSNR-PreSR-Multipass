@@ -7,6 +7,7 @@
 #include "DlssNr_Upscaler.h"
 #include "DlssNr_MenuSections.h"
 #include "DlssNr_Placement.h"
+#include "DlssNr_Hudless.h"
 #include <Config.h>
 #include <menu/menu_common.h>
 #include <algorithm>
@@ -237,6 +238,21 @@ void RenderMenu(Config* config, float menuResScale)
         if (finished && config->DlssNrFinishedHudless.value_or_default())
         {
             ImGui::Indent();
+            bool fgOff = config->DlssNrHudlessFrameGenOff.value_or_default();
+            if (ImGui::Checkbox("Without frame generation", &fgOff))
+                config->DlssNrHudlessFrameGenOff = fgOff;
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Some games (Alan Wake 2) only make the picture without the HUD while their own frame generation\n"
+                    "setting is on. Leave that setting on in the game and tick this: no frames are generated while NR\n"
+                    "is on, but the game keeps the picture without the HUD coming. Reflex stays as the game set it.\n"
+                    "Frame generation stays off while this is ticked, also with NR toggled off.\n"
+                    "A change takes effect the next time the game switches frame generation off itself: open and\n"
+                    "close the game's own menu. Switching it while frames are generated can freeze the game.");
+            if (DlssNr::Hudless::FrameGenerationOffPending())
+                ImGui::TextDisabled("Open and close the game's menu to apply.");
             int applyMode = config->DlssNrHudlessApplyMode.value_or_default() == 1 ? 1 : 0;
             if (ImGui::Combo("NR apply mode", &applyMode, "Ratio (multiplied)\0Add (difference)\0"))
                 config->DlssNrHudlessApplyMode = applyMode;

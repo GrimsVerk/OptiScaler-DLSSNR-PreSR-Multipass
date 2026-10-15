@@ -469,6 +469,8 @@ struct DlssNr_Dx12::State
         bool hudlessHistoryAltValid = false;
         uint64_t hudlessSerial = 0, hudlessFrames = 0, hudlessWindow = 0;
         bool hudlessSeen = false;
+        // Last game frame on which frames were generated (OptiScaler's or the game's frame generation).
+        uint64_t frameGenEpoch = 0;
         double hudlessCpuMs = 0.0, hudlessCpuMaxMs = 0.0;
         std::string status = "Waiting for a finished picture.";
         bool reset = true;

@@ -338,6 +338,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrRunBeforeSr.set_from_config(nrBeforeSr);
             DlssNrFinishedPicture.set_from_config(readBool("DlssNr", "FinishedPicture"));
             DlssNrFinishedHudless.set_from_config(readBool("DlssNr", "FinishedHudless"));
+            DlssNrHudlessFrameGenOff.set_from_config(readBool("DlssNr", "HudlessFrameGenOff"));
             DlssNrHudlessMotionAdaptive.set_from_config(readBool("DlssNr", "HudlessMotionAdaptive"));
             DlssNrHudlessStillStrength.set_from_config(readFloat("DlssNr", "HudlessStillStrength"));
             DlssNrHudlessMotionStrength.set_from_config(readFloat("DlssNr", "HudlessMotionStrength"));
@@ -1297,6 +1298,8 @@ bool Config::SaveIni(std::filesystem::path destination)
                      GetBoolValue(Instance()->DlssNrFinishedPicture.value_for_config()).c_str());
         ini.SetValue("DlssNr", "FinishedHudless",
                      GetBoolValue(Instance()->DlssNrFinishedHudless.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HudlessFrameGenOff",
+                     GetBoolValue(Instance()->DlssNrHudlessFrameGenOff.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HudlessMotionAdaptive",
                      GetBoolValue(Instance()->DlssNrHudlessMotionAdaptive.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HudlessStillStrength",

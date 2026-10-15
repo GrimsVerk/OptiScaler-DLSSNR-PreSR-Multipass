@@ -169,6 +169,8 @@ class Harness
                 cfg.DlssNrApplyModel = number() != 0;
             else if (key == "Enabled")
                 cfg.DlssNrEnabled = number() != 0;
+            else if (key == "HudlessFrameGenOff") // applied at the game's next own frame generation switch-off
+                cfg.DlssNrHudlessFrameGenOff = number() != 0;
             else if (key == "UnlockStrengths") // NR stress test: model strengths above 2
                 cfg.DlssNrUnlockStrengths = number() != 0;
             else if (key == "Intensity")
