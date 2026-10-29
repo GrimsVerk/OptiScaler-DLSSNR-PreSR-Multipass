@@ -65,3 +65,7 @@ copies back instead of binding an illegal UAV.
 ## Across-RR residual (experimental)
 
 See [the maintained integration notes](../../../docs/RESIDUAL-ACROSS-RR.md) for the private colour resolve, signed temporal history, guarded post-RR composition, and validation limits.
+
+## History
+
+An earlier, separate attempt at running NR before the upscaler (the old "NR then SR" fork, September 2026) measured the cost saving and the edge instability of a jittered, aliased pre-SR input, and tried un-jittering and a DLAA pre-pass. Its numbers, verdicts and code are kept in [docs/history/NR-THEN-SR-EXPERIMENT.md](../../../docs/history/NR-THEN-SR-EXPERIMENT.md).
