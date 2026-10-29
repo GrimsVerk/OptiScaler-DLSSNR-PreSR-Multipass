@@ -1,0 +1,1781 @@
+# Stage 1 (pre-rebase) plus every experiment on top of it: ghost probe (MV scale multipliers, per-frame reset),
+# Unjitter (0/1/2) and Stage1Input (DLAA pre-pass). Code only; the precompiled DlssNr_Shader.h/.cso are left out --
+# regenerate them from dlssnr.hlsl with fxc cs_5_0 and shader_tools/create_header.py after applying.
+# Base: 21274132 (Dagherbou's dlss-neural-rendering before the 2026-09-07 rebase, in this repo's history).
+# Apply: git switch -c try-stage1-exp 21274132 && git apply docs/history/nr-then-sr/patches/stage1-experiments.patch
+
+diff --git a/OptiScaler.ini b/OptiScaler.ini
+index 58f889dd..3d029aaf 100644
+--- a/OptiScaler.ini
++++ b/OptiScaler.ini
+@@ -1593,6 +1593,14 @@ MaxRatio=auto
+ ; Default (auto) is 1.0
+ WorkingScale=auto
+ 
++; Where in the frame the model runs. 0 runs it after the upscaler, over the finished display-size
++; frame. 1 runs it before the upscaler, over the game's render-size colour, and hands the upscaler the
++; edited copy -- the model then works on the smaller picture, so its cost and memory fall with the
++; upscaling ratio squared. 1 is an experiment: the model is shown a jittered, pre-antialiasing frame,
++; and the upscaler enlarges whatever it made of it. Ray reconstruction stays on 0. D3D12 only.
++; Default (auto) is 0
++Stage=auto
++
+ ; 0 off, 1 the picture the model sees, 2 its raw answer, 3 what it changed amplified twenty times.
+ ; A flat grey difference view means the model is doing nothing.
+ ; Default (auto) is 0
+@@ -1618,3 +1626,26 @@ LocalTone=auto
+ SkinStructure=auto
+ ; true or false - Default (auto) is true
+ AutoMask=auto
++
++; Diagnostics for the ghost behind moving objects; the defaults change nothing. The two multipliers
++; act on the motion vector scale handed to the model (0 = nothing moved, -1 = direction flipped), and
++; the reset throws the model's temporal history away every frame.
++; Default (auto) is 1.0
++ProbeMvScaleX=auto
++ProbeMvScaleY=auto
++; true or false - Default (auto) is false
++ProbeResetEveryFrame=auto
++
++; Stage 1 only. The render-size frame the model sees is sub-pixel jittered every frame, and the model
++; re-decides every edge on it. 1 samples the frame back by the jitter on the way in and reads the
++; answer back on the way out, so the model sees a picture that holds still; 2 does the same with the
++; sign swapped (the convention is the engine's). 0 is off. The game's own frame is never resampled.
++; Default (auto) is 0
++Unjitter=auto
++
++; Stage 1 only. What the model is shown: 0 the game's raw render (jittered, aliased), 1 the driver's own
++; DLAA of that render, an antialiased picture that holds still between frames, for the model's eyes
++; only. The edit lands on the raw render either way and the game's DLSS still gets its jittered frame.
++; Costs one DLAA evaluate at render size per frame.
++; Default (auto) is 0
++Stage1Input=auto
+diff --git a/OptiScaler/Config.cpp b/OptiScaler/Config.cpp
+index ffcff178..fe864aae 100644
+--- a/OptiScaler/Config.cpp
++++ b/OptiScaler/Config.cpp
+@@ -333,6 +333,7 @@ bool Config::Reload(std::filesystem::path iniPath)
+             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
+             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
+             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
++            DlssNrStage.set_from_config(readUInt("DlssNr", "Stage"));
+             DlssNrProxyProbe.set_from_config(readBool("DlssNr", "ProxyProbe"));
+             DlssNrUseProxy.set_from_config(readBool("DlssNr", "UseProxy"));
+             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
+@@ -360,6 +361,11 @@ bool Config::Reload(std::filesystem::path iniPath)
+             DlssNrLocalTone.set_from_config(readFloat("DlssNr", "LocalTone"));
+             DlssNrSkinStructure.set_from_config(readFloat("DlssNr", "SkinStructure"));
+             DlssNrAutoMask.set_from_config(readBool("DlssNr", "AutoMask"));
++            DlssNrProbeMvScaleX.set_from_config(readFloat("DlssNr", "ProbeMvScaleX"));
++            DlssNrProbeMvScaleY.set_from_config(readFloat("DlssNr", "ProbeMvScaleY"));
++            DlssNrProbeResetEveryFrame.set_from_config(readBool("DlssNr", "ProbeResetEveryFrame"));
++            DlssNrUnjitter.set_from_config(readUInt("DlssNr", "Unjitter"));
++            DlssNrStage1Input.set_from_config(readUInt("DlssNr", "Stage1Input"));
+             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
+ 
+             RenderPresetOverride.set_from_config(readBool("DLSS", "RenderPresetOverride"));
+@@ -1218,6 +1224,7 @@ bool Config::SaveIni()
+     ini.SetValue("DlssNr", "TagScale",
+                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
+     ini.SetValue("DlssNr", "WorkingScale", GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
++    ini.SetValue("DlssNr", "Stage", GetIntValue(Instance()->DlssNrStage.value_for_config()).c_str());
+     ini.SetValue("DlssNr", "AutoCapture", GetBoolValue(Instance()->DlssNrAutoCapture.value_for_config()).c_str());
+ 
+     // These were read every launch but never written, so nothing set through the menu survived a
+@@ -1247,6 +1254,14 @@ bool Config::SaveIni()
+     ini.SetValue("DlssNr", "SkinStructure",
+                  GetFloatValue(Instance()->DlssNrSkinStructure.value_for_config()).c_str());
+     ini.SetValue("DlssNr", "AutoMask", GetBoolValue(Instance()->DlssNrAutoMask.value_for_config()).c_str());
++    ini.SetValue("DlssNr", "ProbeMvScaleX",
++                 GetFloatValue(Instance()->DlssNrProbeMvScaleX.value_for_config()).c_str());
++    ini.SetValue("DlssNr", "ProbeMvScaleY",
++                 GetFloatValue(Instance()->DlssNrProbeMvScaleY.value_for_config()).c_str());
++    ini.SetValue("DlssNr", "ProbeResetEveryFrame",
++                 GetBoolValue(Instance()->DlssNrProbeResetEveryFrame.value_for_config()).c_str());
++    ini.SetValue("DlssNr", "Unjitter", GetIntValue(Instance()->DlssNrUnjitter.value_for_config()).c_str());
++    ini.SetValue("DlssNr", "Stage1Input", GetIntValue(Instance()->DlssNrStage1Input.value_for_config()).c_str());
+         ini.SetValue("DLSS", "RenderPresetOverride",
+                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
+         ini.SetValue("DLSS", "RenderPresetForAll",
+diff --git a/OptiScaler/Config.h b/OptiScaler/Config.h
+index f4cfb8fc..09d0cc50 100644
+--- a/OptiScaler/Config.h
++++ b/OptiScaler/Config.h
+@@ -270,6 +270,40 @@ class Config
+     CustomOptional<float> DlssNrSkinStructure { -1.0f };
+     CustomOptional<bool> DlssNrAutoMask { true };
+ 
++    // Diagnostics for the model's temporal history. All three leave the picture alone at their
++    // defaults, and none of them is a setting anyone should keep.
++    //
++    // The two multipliers act on the motion vector scale handed to the model, on top of the game's
++    // own scale and the working-scale ratio. They exist because the model ghosts behind moving
++    // objects on both sides of the upscaler (Jedi Survivor, 2026-09-03), which is what a history
++    // moved the wrong distance, or in the wrong direction, looks like. 0 tells the model nothing
++    // moved; -1 flips the direction; 0.5 and 2 halve and double the distance. If any of those
++    // changes the ghost, the game's vector convention and the model's disagree.
++    //
++    // Reset every frame throws the model's history away each evaluate. If the ghost vanishes, it
++    // is the history; if it stays, it is something the model does to a single frame.
++    CustomOptional<float> DlssNrProbeMvScaleX { 1.0f };
++    CustomOptional<float> DlssNrProbeMvScaleY { 1.0f };
++    CustomOptional<bool> DlssNrProbeResetEveryFrame { false };
++
++    // Before the upscaler, show the model a frame that does not shift under it.
++    //
++    // The render-size frame is sub-pixel jittered every frame and the model re-decides every edge
++    // on it; measured in Jedi Survivor at three times the frame-to-frame instability of the same
++    // model on a resolved frame, and seen as a fuzzy, unstable edge on anything with a silhouette.
++    // 1 samples the frame at +jitter on the way in and reads the answer back at -jitter; 2 does the
++    // same with the signs swapped, because the convention is the engine's. 0 is off. The untouched
++    // copy is never resampled, so strength 0 stays bit-identical. Does nothing on stage 0.
++    CustomOptional<uint32_t> DlssNrUnjitter { 0 };
++
++    // What the model is shown before the upscaler. 0 the game's raw render, jittered and aliased.
++    // 1 the driver's own DLAA of that render -- DLSS at 1:1 -- an antialiased picture that holds
++    // still between frames, for the model's eyes only. The edit is composed onto the raw render
++    // either way and the game's DLSS still receives its jittered frame; the DLAA picture is
++    // discarded once the model has read it. Costs one DLAA evaluate at render size per frame.
++    // Un-jittering's resolve shift is always applied in mode 1, with the sign the control chose.
++    CustomOptional<uint32_t> DlssNrStage1Input { 0 };
++
+     // How much of the model's edit reaches the frame. Separated because detail synthesis is a luminance
+     // edit and any colour shift is usually the part you do not want, and allowed past 1.0 because
+     // exaggerating an edit is the only honest way to see whether there is one.
+@@ -340,6 +374,22 @@ class Config
+     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
+     CustomOptional<float> DlssNrWorkingScale { 1.0f };
+ 
++    // Where in the frame the model runs.
++    //
++    //   0  after the upscaler, over the finished display-resolution frame. The original design.
++    //   1  before the upscaler, over the game's render-resolution colour. The model's edit is
++    //      written to a private copy of that colour, and the upscaler is handed the copy in place
++    //      of the game's buffer. The frame the model works on is then the render size rather than
++    //      the display size, so its cost and memory fall with the upscaling ratio squared.
++    //
++    // Stage 1 is an experiment. The model is shown a jittered, pre-antialiasing frame it was not
++    // trained on, and whatever it synthesises is then enlarged by the upscaler. Whether that looks
++    // acceptable is exactly the question it exists to answer. Ray reconstruction evaluates are left
++    // on stage 0 regardless: their colour input is undenoised.
++    //
++    // D3D12 and the two bridges only. Native Vulkan stays on stage 0.
++    CustomOptional<uint32_t> DlssNrStage { 0 };
++
+     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
+     //
+     // Everything here drives the model's DLL directly through a forwarder, because the model refuses
+diff --git a/OptiScaler/dlssnr/DlssNrFeature_Dx12.h b/OptiScaler/dlssnr/DlssNrFeature_Dx12.h
+index 861d5e6d..f4e87506 100644
+--- a/OptiScaler/dlssnr/DlssNrFeature_Dx12.h
++++ b/OptiScaler/dlssnr/DlssNrFeature_Dx12.h
+@@ -30,8 +30,72 @@ namespace DlssNr
+ // timingQueue is the queue this command list will be executed on, when the caller knows it.
+ // State::currentCommandQueue only exists once a D3D12 swapchain has been created, which a Vulkan
+ // game never does -- so without this the pass runs and never reports what it cost.
++//
++// preUpscaleDeclined is ScopedPreUpscale::Declined() from the scope wrapped around this same
++// evaluate, when there was one. On stage 1 this pass stands down unless that scope declined the
++// evaluate for a reason this side can serve.
+ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+-                          ID3D12CommandQueue* timingQueue = nullptr);
++                          ID3D12CommandQueue* timingQueue = nullptr, bool preUpscaleDeclined = false);
++
++// The other place the model can run: before the upscaler, over the game's render-resolution colour.
++//
++// Stage 1 in the config. The model is shown the colour the game is about to hand the upscaler --
++// jittered, aliased, at render size -- with depth and motion vectors that are for once the same size
++// as the picture. Its edit is composed into a private copy of that colour, and for the duration of
++// the upscaler's evaluate the parameter block names the copy as the colour input. The game's own
++// buffer is never written. The upscaler then enlarges the edited frame exactly as it would have
++// enlarged the original, and everything after it -- frame generation, the interface -- is untouched.
++//
++// Why it is a scope: the swap has to be undone. The parameter block is the game's, it is reused
++// next frame, and a block still pointing at a texture of ours is a stale read the moment the copy
++// is reallocated. Construct it around the upscaler's evaluate and the destructor puts the original
++// back, whichever way the evaluate went.
++//
++//   bool declined = false;
++//   {
++//       DlssNr::ScopedPreUpscale pre(cmdList, params, isNotRayReconstruction);
++//       result = upscaler->Evaluate(cmdList, params);
++//       declined = pre.Declined();
++//   }
++//   DlssNr::EvaluateAfterUpscale(cmdList, params, queue, declined);
++//
++// applies says whether this evaluate is one the pre-upscale path should serve at all. Ray
++// reconstruction is not: its colour input is undenoised, and the model has no business synthesising
++// detail into noise. When the pre-upscale path declines an evaluate for such a reason, the
++// after-upscale path is allowed to run for it instead, so the frame is still served -- and the
++// caller carries that answer across, through Declined(), rather than the two sides sharing a global.
++// Frame generation evaluates do not get a scope at all: they are not upscales, and in Jedi Survivor
++// they arrive on their own command list interleaved with the upscaler's.
++//
++// Does nothing at all unless the pass is enabled and the stage is 1, so it is safe to leave in place
++// around every upscaler evaluate.
++class ScopedPreUpscale
++{
++  public:
++    ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, bool applies,
++                     ID3D12CommandQueue* timingQueue = nullptr);
++    ~ScopedPreUpscale();
++
++    ScopedPreUpscale(const ScopedPreUpscale&) = delete;
++    ScopedPreUpscale& operator=(const ScopedPreUpscale&) = delete;
++
++    // Whether the upscaler is reading the model's edit this frame.
++    bool Swapped() const { return _swapped; }
++
++    // Whether this evaluate was handed to the after-upscale path instead. Pass it to
++    // EvaluateAfterUpscale for the same evaluate.
++    bool Declined() const { return _declined; }
++
++  private:
++    ID3D12GraphicsCommandList* _cmdList = nullptr;
++    NVSDK_NGX_Parameter* _params = nullptr;
++    ID3D12Resource* _original = nullptr;
++    bool _originalTyped = false;
++    // The state the copy was handed to the upscaler in, to move it back out of.
++    int _scratchState = 0;
++    bool _swapped = false;
++    bool _declined = false;
++};
+ 
+ 
+ 
+diff --git a/OptiScaler/dlssnr/DlssNr_Menu.cpp b/OptiScaler/dlssnr/DlssNr_Menu.cpp
+index bbda2beb..30894515 100644
+--- a/OptiScaler/dlssnr/DlssNr_Menu.cpp
++++ b/OptiScaler/dlssnr/DlssNr_Menu.cpp
+@@ -152,6 +152,99 @@ void RenderMenu(Config* config, float menuResScale)
+         ImGui::Spacing();
+         ImGui::PushItemWidth(220.0f * menuResScale);
+ 
++        // Which side of the upscaler the model runs on. Takes effect on the next frame: the target
++        // changes size and format, which the pass already treats as a resolution change and rebuilds
++        // for. Native Vulkan has no before-upscale path and the control says so.
++        {
++            static const char* stageNames[] = { "After the upscaler", "Before the upscaler (experimental)" };
++            int stage = config->DlssNrStage.value_or_default() == 1 ? 1 : 0;
++
++            if (vulkan)
++                ImGui::BeginDisabled();
++
++            if (ImGui::Combo("Stage", &stage, stageNames, IM_ARRAYSIZE(stageNames)))
++                config->DlssNrStage = (uint32_t) stage;
++
++            if (vulkan)
++                ImGui::EndDisabled();
++
++            HelpMarker("Where in the frame the model runs."
++                       "\n\nAfter the upscaler is the original design: the model is shown the finished,"
++                       "\ndisplay-size frame and edits it in place. Its cost scales with the display"
++                       "\nresolution."
++                       "\n\nBefore the upscaler shows the model the game's render-size colour instead --"
++                       "\nthe picture the upscaler is about to enlarge -- and hands the upscaler the"
++                       "\nedited copy. The model then works on the smaller picture, so its cost and"
++                       "\nmemory fall with the upscaling ratio squared: at Performance mode, a quarter."
++                       "\n\nThe trade is unknown, which is why this exists. The model was trained on"
++                       "\nfinished frames, and here it sees a jittered, aliased one; whatever it"
++                       "\nsynthesises is then enlarged by the upscaler. Ray reconstruction stays on"
++                       "\nthe after-upscale side regardless, because its colour is undenoised."
++                       "\n\nD3D12 games and the D3D11 and Vulkan bridges. Not native Vulkan.");
++        }
++
++        // Stage 1's companion. Live: the offset is a constant the encode and the resolve read every
++        // frame, so nothing rebuilds and the three states can be compared by flicking between them.
++        {
++            static const char* unjitterNames[] = { "Off", "On (+jitter)", "On (-jitter)" };
++            int unjitter = (int) std::min(config->DlssNrUnjitter.value_or_default(), 2u);
++
++            const bool stage1 = config->DlssNrStage.value_or_default() == 1 && !vulkan;
++
++            if (!stage1)
++                ImGui::BeginDisabled();
++
++            if (ImGui::Combo("Un-jitter (before the upscaler)", &unjitter, unjitterNames, IM_ARRAYSIZE(unjitterNames)))
++                config->DlssNrUnjitter = (uint32_t) unjitter;
++
++            if (!stage1)
++                ImGui::EndDisabled();
++
++            HelpMarker("Before the upscaler the model is shown the game's jittered render: the whole"
++                       "\npicture sits a fraction of a pixel away from where it sat last frame, and the"
++                       "\nmodel re-decides every edge on it. Measured at three times the frame-to-frame"
++                       "\ninstability of the same model on a resolved frame, and seen as a fuzzy,"
++                       "\nunstable silhouette."
++                       "\n\nOn samples the frame back by the jitter on the way in, so the model sees a"
++                       "\npicture that holds still, and reads its answer back by the same offset on the"
++                       "\nway out. The game's own frame is never resampled; at detail strength 0 the"
++                       "\noutput is still bit-identical."
++                       "\n\nTwo signs because the convention is the engine's. One of them steadies the"
++                       "\nedge; the other doubles the shift. Try both and keep the one that holds still."
++                       "\n\nCosts two bilinear reads at render size. Applies on the next frame.");
++        }
++
++        // What the model is shown on stage 1. Live: the DLAA feature is created on the first frame
++        // it is asked for and parked when it is not, so flicking between the two is a fair A/B.
++        {
++            static const char* inputNames[] = { "The game's raw render", "DLAA of the render (experimental)" };
++            int input = (int) std::min(config->DlssNrStage1Input.value_or_default(), 1u);
++
++            const bool stage1 = config->DlssNrStage.value_or_default() == 1 && !vulkan;
++
++            if (!stage1)
++                ImGui::BeginDisabled();
++
++            if (ImGui::Combo("Stage 1: what the model sees", &input, inputNames, IM_ARRAYSIZE(inputNames)))
++                config->DlssNrStage1Input = (uint32_t) input;
++
++            if (!stage1)
++                ImGui::EndDisabled();
++
++            HelpMarker("Before the upscaler the model is shown the game's raw render: jittered and"
++                       "\naliased, so every edge is re-rasterised each frame and the model re-decides"
++                       "\nit. Un-jittering takes back a quarter of that; the rest is the aliasing."
++                       "\n\nDLAA shows the model NVIDIA's own antialiasing of that render instead -- DLSS"
++                       "\nat 1:1, fed the same depth, motion vectors and jitter the game hands its own"
++                       "\nDLSS. The model then sees a picture that holds still. Its edit is still"
++                       "\ncomposed onto the raw render, read back by the jitter, and the game's DLSS"
++                       "\nstill receives its jittered frame; the DLAA picture is thrown away once the"
++                       "\nmodel has read it."
++                       "\n\nCosts one DLAA evaluate at render size, well under a millisecond. Takes one"
++                       "\nframe to appear the first time. If the driver refuses it, the log says why"
++                       "\nand the model sees the raw render.");
++        }
++
+         // Any percentage, rather than a handful of steps somebody chose in advance. The lower bound
+         // is 25%: below that the model is working on so little of the picture that its answer no
+         // longer survives being enlarged onto it.
+@@ -299,6 +392,41 @@ void RenderMenu(Config* config, float menuResScale)
+ 
+         HelpMarker("Lets the model find skin itself rather than treating the frame uniformly.");
+ 
++        ImGui::SeparatorText("Diagnostics");
++
++        ImGui::TextDisabled("For chasing the ghost behind moving objects. 1, 1 and off leave the\n"
++                            "picture exactly as it was. Applied on the next frame; nothing rebuilds.");
++
++        {
++            float probeX = config->DlssNrProbeMvScaleX.value_or_default();
++            if (ImGui::SliderFloat("Probe: motion scale X", &probeX, -2.0f, 2.0f, "%.3f"))
++                config->DlssNrProbeMvScaleX = probeX;
++
++            float probeY = config->DlssNrProbeMvScaleY.value_or_default();
++            if (ImGui::SliderFloat("Probe: motion scale Y", &probeY, -2.0f, 2.0f, "%.3f"))
++                config->DlssNrProbeMvScaleY = probeY;
++
++            ImGui::SameLine();
++            if (ImGui::SmallButton("Both 1"))
++            {
++                config->DlssNrProbeMvScaleX = 1.0f;
++                config->DlssNrProbeMvScaleY = 1.0f;
++            }
++
++            HelpMarker("Multipliers on the motion vector scale the model is given, on top of the"
++                       "\ngame's own scale. 0 tells the model nothing moved; -1 flips the direction;"
++                       "\n0.5 and 2 halve and double the distance. Ctrl+click a slider to type a value."
++                       "\n\nIf any of these changes the ghost, the game's vector convention and the"
++                       "\nmodel's disagree, and the value that kills it says how.");
++
++            bool probeReset = config->DlssNrProbeResetEveryFrame.value_or_default();
++            if (ImGui::Checkbox("Probe: reset history every frame", &probeReset))
++                config->DlssNrProbeResetEveryFrame = probeReset;
++
++            HelpMarker("Throws the model's temporal history away on every frame. If the ghost"
++                       "\nvanishes, it is the history. If it stays, the model does it to a single frame.");
++        }
++
+         ImGui::SeparatorText("Colour");
+ 
+         ImGui::TextDisabled("The model was trained on finished, sRGB-encoded frames. The upscaler's\n"
+diff --git a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp b/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
+index a0c4ed2b..7daddbfa 100644
+--- a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
++++ b/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
+@@ -1149,8 +1149,27 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
+         {
+             LOG_DEBUG("Passthrough to native DLSS EvaluateFeature for handle {}", handleId);
+ 
+-            NVSDK_NGX_Result result =
+-                NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
++            const bool isUpscale = feature != NVSDK_NGX_Feature_FrameGeneration;
++            NVSDK_NGX_Result result;
++            bool preUpscaleDeclined = false;
++
++            {
++                // Neural Rendering before the upscaler, when the stage says so: the model edits a
++                // copy of the render-size colour and the upscaler is handed that copy for the
++                // duration of this evaluate. A no-op on stage 0. Ray reconstruction is left to the
++                // after-upscale pass; its colour input is undenoised. Frame generation is not an
++                // upscale at all and gets no scope: in Jedi Survivor its evaluate arrives on its own
++                // command list between the upscaler's, and a scope built for it once told the
++                // upscaler's after-pass that the model had declined.
++                std::optional<DlssNr::ScopedPreUpscale> pre;
++
++                if (isUpscale)
++                    pre.emplace(InCmdList, InParameters, feature != NVSDK_NGX_Feature_RayReconstruction);
++
++                result = NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
++                preUpscaleDeclined = pre.has_value() && pre->Declined();
++            }
++
+             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
+ 
+             // Neural Rendering runs over what the upscaler just wrote, on the same list, so frame
+@@ -1158,8 +1177,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
+             // rendered frame. The feature check is the point: frame generation is handed depth and
+             // motion vectors too, and its handle can reach here because the branch above does not
+             // return, so filtering on the parameter block alone would run the model twice a frame.
+-            if (result == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration)
+-                DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
++            // Stands down by itself on stage 1, unless the pre-upscale scope declined this evaluate.
++            if (result == NVSDK_NGX_Result_Success && isUpscale)
++                DlssNr::EvaluateAfterUpscale(InCmdList, InParameters, nullptr, preUpscaleDeclined);
+ 
+             return result;
+         }
+@@ -1182,11 +1202,26 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
+         InParameters->Set("DLSSG.CameraFar", lastDlssgCameraFar.value());
+ 
+     // OptiScaler internal handling
+-    const NVSDK_NGX_Result optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
++    const bool isUpscale = feature != NVSDK_NGX_Feature_FrameGeneration;
++    NVSDK_NGX_Result optiResult;
++    bool preUpscaleDeclined = false;
++
++    {
++        // The same pre-upscale scope as the native route above, for OptiScaler's own upscalers.
++        // Every upscaler in this tree reads its colour from the parameter block, so the swap
++        // reaches all of them -- and the shims for FSR and XeSS inputs arrive here too.
++        std::optional<DlssNr::ScopedPreUpscale> pre;
++
++        if (isUpscale)
++            pre.emplace(InCmdList, InParameters, feature != NVSDK_NGX_Feature_RayReconstruction);
++
++        optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
++        preUpscaleDeclined = pre.has_value() && pre->Declined();
++    }
+ 
+     // Same pass, for OptiScaler's own upscalers rather than native DLSS.
+-    if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration)
+-        DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
++    if (optiResult == NVSDK_NGX_Result_Success && isUpscale)
++        DlssNr::EvaluateAfterUpscale(InCmdList, InParameters, nullptr, preUpscaleDeclined);
+ 
+     return optiResult;
+ }
+diff --git a/OptiScaler/shaders/dlssnr/DlssNr_Common.h b/OptiScaler/shaders/dlssnr/DlssNr_Common.h
+index 540c6fd8..d5ad09f1 100644
+--- a/OptiScaler/shaders/dlssnr/DlssNr_Common.h
++++ b/OptiScaler/shaders/dlssnr/DlssNr_Common.h
+@@ -96,6 +96,28 @@ struct DlssNrFrameInfo
+     // available and is what gets used.
+     unsigned int RenderSubrectWidth = 0;
+     unsigned int RenderSubrectHeight = 0;
++
++    // The resource state the output arrives in and is handed back in, as a D3D12_RESOURCE_STATES
++    // value, when the caller owns the output and knows. Negative means the output is the upscaler's
++    // and arrives in whatever state the config says the upscaler left it in.
++    //
++    // An int rather than the enum so this header stays free of Direct3D. The pre-upscale path owns
++    // its output -- a private copy of the game's colour -- and rests it in UNORDERED_ACCESS; reading
++    // the config for that copy would transition it out of a state it was never in.
++    int OutputState = -1;
++
++    // The game's sub-pixel jitter for this frame, in render pixels, as it told the upscaler
++    // (Jitter.Offset.X/Y). Zero when the game did not say. Only the before-upscale path has any use
++    // for it: the frame it shows the model is the jittered one, and the model re-decides edges on a
++    // picture that shifts under it. The after-upscale frame is already resolved.
++    float JitterX = 0.0f;
++    float JitterY = 0.0f;
++
++    // When the picture the model is shown is not the frame the edit lands on: the before-upscale
++    // path can hand the model an antialiased version of the render (DLAA) while composing the edit
++    // onto the raw jittered render itself. This is that raw frame, as an ID3D12Resource* the header
++    // does not name. Null means the model sees the frame it edits, which is every other case.
++    void* OriginalOverride = nullptr;
+ };
+ 
+ struct alignas(256) DlssNrConstants
+@@ -164,6 +186,23 @@ struct alignas(256) DlssNrConstants
+     // two captures at different exposures then differ by the exposure, whatever the edit did. This
+     // is the user's own multiplier, which holds still while the meter works.
+     float DebugScale;
++
++    // Un-jittering, for the before-upscale path. Appended after everything else so the Vulkan
++    // shader, which shares this layout and was not rebuilt, keeps reading the prefix it knows.
++    //
++    // The game's jitter for this frame in render pixels, and what to do with it: 0 nothing, 1 the
++    // encode samples the frame at +jitter and the resolve reads the model's answer back at -jitter,
++    // 2 the same with the signs swapped. The sign convention is the engine's, so both exist. The
++    // untouched copy is never resampled -- strength 0 stays bit-identical either way.
++    float JitterX;
++    float JitterY;
++    uint32_t Unjitter;
++
++    // The model was shown a different picture from the one the edit lands on (the DLAA pre-pass).
++    // The encode keeps the untouched copy from the original slot instead of the source, and the
++    // resolve carries only the model's difference across, on the original's own proxy, because a
++    // ratio between an antialiased proxy and an aliased frame is an edge artefact, not an edit.
++    uint32_t ForeignInput;
+ };
+ 
+ class DlssNr_Common
+diff --git a/OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp b/OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp
+index f21fd42f..a50d3733 100644
+--- a/OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp
++++ b/OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp
+@@ -324,6 +324,33 @@ struct NrState
+ NrState g_nr;
+ std::unique_ptr<DlssNr_Dx12> g_compose;
+ 
++// The before-upscale path's own surface: the copy of the game's colour that carries the model's edit
++// into the upscaler. Sized to the render subrect and reallocated when that moves, which in a
++// dynamic-resolution game is often -- see the design note for what that costs and what to do about it.
++struct PreUpscaleState
++{
++    ID3D12Resource* scratch = nullptr;
++    unsigned int width = 0;
++    unsigned int height = 0;
++    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
++
++    // The DLAA pre-pass: the driver's own DLSS run at 1:1 over the render, into a surface only the
++    // model ever reads. The model then sees an antialiased, temporally settled picture instead of
++    // the raw jittered raster it re-decides every edge on. The edit is composed onto the raw render
++    // regardless; this surface is discarded once the model has looked at it. See Stage1Input.
++    NVSDK_NGX_Handle* dlaaHandle = nullptr;
++    NVSDK_NGX_Parameter* dlaaParams = nullptr;
++    ID3D12Resource* dlaa = nullptr;
++    unsigned int dlaaWidth = 0;
++    unsigned int dlaaHeight = 0;
++    DXGI_FORMAT dlaaFormat = DXGI_FORMAT_UNKNOWN;
++    unsigned int dlaaFlags = 0;
++    bool dlaaFailed = false;
++    const char* dlaaReason = "";
++};
++
++PreUpscaleState g_pre;
++
+ // What the pass costs on the GPU, for the breakdown in the overlay.
+ std::unique_ptr<GpuTime_Dx12> g_gpuTime;
+ 
+@@ -624,6 +651,9 @@ void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
+ struct NrRetired
+ {
+     void* feature = nullptr;
++    // A feature of the driver's own DLSS (the DLAA pre-pass), released through NGX rather than the
++    // forwarder.
++    NVSDK_NGX_Handle* ngxFeature = nullptr;
+     ID3D12Resource* resource = nullptr;
+     int framesLeft = 32;
+ };
+@@ -641,6 +671,17 @@ void ParkNrFeature(void*& feature)
+     g_nrRetired.push_back(r);
+ }
+ 
++void ParkNgxFeature(NVSDK_NGX_Handle*& feature)
++{
++    if (feature == nullptr)
++        return;
++
++    NrRetired r;
++    r.ngxFeature = feature;
++    feature = nullptr;
++    g_nrRetired.push_back(r);
++}
++
+ void ParkNrResource(ID3D12Resource*& res)
+ {
+     if (res == nullptr)
+@@ -665,6 +706,9 @@ void TickNrRetired()
+         if (g_nrRetired[i].feature != nullptr && g_nr.release != nullptr)
+             g_nr.release(g_nrRetired[i].feature);
+ 
++        if (g_nrRetired[i].ngxFeature != nullptr && NVNGXProxy::D3D12_ReleaseFeature() != nullptr)
++            NVNGXProxy::D3D12_ReleaseFeature()(g_nrRetired[i].ngxFeature);
++
+         if (g_nrRetired[i].resource != nullptr)
+             g_nrRetired[i].resource->Release();
+ 
+@@ -1060,6 +1104,53 @@ ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned
+     return res;
+ }
+ 
++// The before-upscale copy. A scratch surface with one extra allowance: some games leave their colour
++// in RENDER_TARGET and say so through ColorResourceBarrier, and the upscaler then transitions whatever
++// it is handed as colour from that state. A copy standing in for the colour has to be able to sit in
++// it, and a transition into RENDER_TARGET on a surface created without the flag is invalid. Colour
++// formats all allow it; if one does not, the plain scratch serves and the config is left to be wrong.
++ID3D12Resource* CreatePreUpscaleScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width,
++                                        unsigned int height)
++{
++    D3D12_HEAP_PROPERTIES heap {};
++    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++
++    D3D12_RESOURCE_DESC desc {};
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    desc.Width = width;
++    desc.Height = height;
++    desc.DepthOrArraySize = 1;
++    desc.MipLevels = 1;
++    desc.Format = format;
++    desc.SampleDesc.Count = 1;
++    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++
++    ID3D12Resource* res = nullptr;
++
++    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
++                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
++                                               IID_PPV_ARGS(&res))))
++        res = CreateScratch(device, format, width, height);
++
++    return res;
++}
++
++// An sRGB surface cannot be written through a UAV, and its typed twin would be read by the upscaler
++// as linear -- a different picture, gamma-shifted. Such a colour is left to the after-upscale path.
++bool IsSrgb(DXGI_FORMAT f)
++{
++    switch (f)
++    {
++    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
++    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
++        return true;
++    default:
++        return false;
++    }
++}
++
+ void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
+              D3D12_RESOURCE_STATES to)
+ {
+@@ -1464,7 +1555,7 @@ DlssNr_Dx12::~DlssNr_Dx12()
+     }
+ }
+ 
+-void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
++bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
+                            ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
+                            const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
+ {
+@@ -1475,19 +1566,41 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         motion == nullptr || output == nullptr)
+     {
+         ReportSkipOnce(g_nr.failed ? "it already failed this session" : "a resource was missing");
+-        return;
++        return false;
+     }
+ 
+     ID3D12Resource* target = output;
+ 
++    // What the model is shown. On the after-upscale path it is the target itself: the pass reads the
++    // upscaler's output and writes the edit back over it, so the target is moved to a readable state
++    // around every read. On the before-upscale path it is the game's own colour, which arrives in
++    // NON_PIXEL_SHADER_RESOURCE -- the state NGX requires of every input -- is read there, and is
++    // never written or transitioned by this pass at all.
++    ID3D12Resource* const source = colour;
++    const bool sourceIsTarget = source == target;
++
++    // The frame the edit lands on. The same as the source everywhere except the DLAA pre-pass,
++    // where the model is shown an antialiased picture and the edit is composed onto the raw render.
++    ID3D12Resource* const original =
++        frame.OriginalOverride != nullptr ? static_cast<ID3D12Resource*>(frame.OriginalOverride) : source;
++    const bool foreignInput = original != source;
++
++    // Whether the resolve wrote the target this frame. See the header.
++    bool wrote = false;
++
+     // The state the upscaler left the output in. Every upscaler in this tree ends Evaluate by moving
+     // the output to OutputResourceBarrier when the user set it (FFXFeature_Dx12.cpp:606 and the FSR2 /
+     // XeSS equivalents), and leaves it in UNORDERED_ACCESS -- what its own compute wrote -- when they
+     // did not. This pass then reads and writes the output as a UAV, so it normalises to that here and
+     // restores the arrival state before every exit. When the config is unset the two states are equal
+     // and Barrier() skips the no-op, so the default path is byte-identical.
++    //
++    // Unless the caller owns the output and says otherwise. The before-upscale path writes into a copy
++    // of its own that never passed through an upscaler, and rests it in UNORDERED_ACCESS whatever the
++    // config says about the game's output.
+     const D3D12_RESOURCE_STATES outputArrival =
+-        Config::Instance()->OutputResourceBarrier.has_value()
++        frame.OutputState >= 0 ? (D3D12_RESOURCE_STATES) frame.OutputState
++        : Config::Instance()->OutputResourceBarrier.has_value()
+             ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
+             : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+ 
+@@ -1498,7 +1611,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+     if (FAILED(target->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+     {
+         ReportSkipOnce("the output texture belongs to no D3D12 device");
+-        return;
++        return false;
+     }
+ 
+     const D3D12_RESOURCE_DESC desc = target->GetDesc();
+@@ -1620,7 +1733,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         g_nr.failed = true;
+         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+         device->Release();
+-        return;
++        return false;
+     }
+ 
+     // What the model works at. The frame and its edit stay full resolution; only the model's input and
+@@ -1721,7 +1834,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+             g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
+             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+             device->Release();
+-            return;
++            return false;
+         }
+ 
+         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+@@ -1749,27 +1862,28 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+             LOG_ERROR("DLSS-NR create failed: init 0x{:X} ({}), create 0x{:X} ({})", initResult,
+                       NgxResultName(initResult), createResult, NgxResultName(createResult));
+             device->Release();
+-            return;
++            return false;
+         }
+ 
+         g_nr.width = width;
+         g_nr.height = height;
+         g_nr.reset = true;
+         RecordBuiltTuning(cfg);
+-        LOG_INFO("DLSS-NR running at {}x{}, guides {}x{} (preset {}, intensity {}, style {})", width,
+-                 height, guideWidth, guideHeight, g_nr.builtPreset, g_nr.builtIntensity, g_nr.builtStyle);
++        LOG_INFO("DLSS-NR running at {}x{}, guides {}x{} (preset {}, intensity {}, style {}), {} the upscaler",
++                 width, height, guideWidth, guideHeight, g_nr.builtPreset, g_nr.builtIntensity,
++                 g_nr.builtStyle, sourceIsTarget ? "after" : "before");
+ 
+         // Creating and evaluating a feature in the same command list is the dice-roll that hung the
+         // GPU (every crash died on a creation frame). The creation goes through the game's own submit
+         // first; the first evaluate happens next frame. One frame without the model is invisible.
+         device->Release();
+-        return;
++        return false;
+     }
+ 
+     if (g_nr.feature == nullptr)
+     {
+         device->Release();
+-        return;
++        return false;
+     }
+ 
+     // The upscaler has just written this, so it is a UAV. The model needs it readable.
+@@ -1801,7 +1915,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         g_nr.reason = "the colour codec would not compile";
+         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+         device->Release();
+-        return;
++        return false;
+     }
+ 
+     // What the upscaler produces is linear HDR with an open-ended range; the model was trained on
+@@ -1849,7 +1963,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         // It was not released here, and this is the one path a bindless game takes every single frame
+         // -- so the game that most needed this skip was also leaking a device reference per frame.
+         device->Release();
+-        return;
++        return false;
+     }
+ 
+     // From here on the pass binds its own root signature, heaps and pipeline. Everything below runs
+@@ -1899,12 +2013,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         meterParams.Width = 1;
+         meterParams.Height = 1;
+ 
+-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-        DispatchPass(cmdList, meterParams, target, nullptr, nullptr,
++        if (sourceIsTarget)
++            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++
++        DispatchPass(cmdList, meterParams, source, nullptr, nullptr,
+                      (ID3D12Resource*) frame.ExposureTexture, nullptr, g_nr.meter, nullptr);
+-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++
++        if (sourceIsTarget)
++            Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
++                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+ 
+         CopyMeterToReadback(cmdList, device, true);
+         ConsumeMeterReadback();
+@@ -1925,13 +2043,49 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+     encodeParams.Width = width;
+     encodeParams.Height = height;
+ 
+-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, nullptr,
++    // Un-jittering only has a jittered frame to act on before the upscaler. After it the frame is
++    // resolved, and the offset would only move a still picture.
++    //
++    // With the DLAA pre-pass the picture the model sees is already on the un-jittered grid, so the
++    // encode must not shift it -- but the edit still has to be read back onto the jittered raw
++    // render, so the resolve always shifts, with the sign the control chose (+ unless told -).
++    const uint32_t unjitter = sourceIsTarget ? 0u : cfg.DlssNrUnjitter.value_or_default();
++    const uint32_t encodeUnjitter = foreignInput ? 0u : unjitter;
++    const uint32_t resolveUnjitter = foreignInput ? (unjitter == 2u ? 2u : 1u) : unjitter;
++    encodeParams.JitterX = frame.JitterX;
++    encodeParams.JitterY = frame.JitterY;
++    encodeParams.Unjitter = encodeUnjitter;
++    encodeParams.ForeignInput = foreignInput ? 1u : 0u;
++
++    {
++        static uint32_t saidUnjitter = 0;
++        static bool saidForeign = false;
++
++        if (saidUnjitter != unjitter || saidForeign != foreignInput)
++        {
++            saidUnjitter = unjitter;
++            saidForeign = foreignInput;
++            LOG_INFO("DLSS-NR un-jitter: {} (this frame's jitter {} x {}); the model sees {}",
++                     unjitter == 0 ? "off" : unjitter == 1 ? "sample at +jitter" : "sample at -jitter",
++                     frame.JitterX, frame.JitterY,
++                     foreignInput ? "the DLAA of the render, and the edit is read back by the jitter"
++                                  : "the frame the edit lands on");
++        }
++    }
++
++    // The encode reads the source's top-left width x height. That is the whole source on the
++    // after-upscale path; on the before-upscale path the source may be a dynamic-resolution game's
++    // full allocation, of which the render subrect -- the target's size -- is what was drawn.
++    if (sourceIsTarget)
++        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++
++    DispatchPass(cmdList, encodeParams, source, nullptr, original, nullptr, nullptr,
+                         g_nr.colorCopy, g_nr.hdrCopy);
+ 
+-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++    if (sourceIsTarget)
++        Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
++                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+     // The transitions double as the wait for the encode's writes.
+     Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+@@ -1972,7 +2126,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+         device->Release();
+-        return;
++        return false;
+     }
+ 
+     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
+@@ -1980,6 +2134,27 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+     // working size.
+     const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
+ 
++    // The diagnostics, which are 1, 1 and off unless somebody is chasing the ghost. See Config.h.
++    const float probeMvX = cfg.DlssNrProbeMvScaleX.value_or_default();
++    const float probeMvY = cfg.DlssNrProbeMvScaleY.value_or_default();
++    const bool probeReset = cfg.DlssNrProbeResetEveryFrame.value_or_default();
++
++    {
++        static float saidProbeX = 1.0f, saidProbeY = 1.0f;
++        static bool saidProbeReset = false;
++
++        if (saidProbeX != probeMvX || saidProbeY != probeMvY || saidProbeReset != probeReset)
++        {
++            saidProbeX = probeMvX;
++            saidProbeY = probeMvY;
++            saidProbeReset = probeReset;
++            LOG_INFO("DLSS-NR probe: motion vector scale x{} x{}, reset every frame {}; the model is "
++                     "handed scale {} x {}",
++                     probeMvX, probeMvY, probeReset ? "on" : "off", g_nr.guideMvScaleX * mvToWork * probeMvX,
++                     g_nr.guideMvScaleY * mvToWork * probeMvY);
++        }
++    }
++
+     SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+ 
+     // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
+@@ -2006,7 +2181,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+ 
+         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+         device->Release();
+-        return;
++        return false;
+     }
+ 
+     if (g_ngxTime != nullptr)
+@@ -2017,11 +2192,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+     const int result = g_nr.evaluate(
+         cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
+         workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
+-        g_nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
++        (g_nr.reset || probeReset) ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
+         (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+         cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+-        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
+-        g_nr.guideMvScaleY * mvToWork);
++        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork * probeMvX,
++        g_nr.guideMvScaleY * mvToWork * probeMvY);
+ 
+     if (g_ngxTime != nullptr)
+         g_ngxTime->End(cmdList);
+@@ -2090,6 +2265,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         resolveParams.CompareSplit = cfg.DlssNrCompareSplit.value_or_default();
+         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
+         resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
++        resolveParams.JitterX = frame.JitterX;
++        resolveParams.JitterY = frame.JitterY;
++        resolveParams.Unjitter = resolveUnjitter;
++        resolveParams.ForeignInput = foreignInput ? 1u : 0u;
+ 
+         // The numbers the composition actually ran with, logged when any of them changes.
+         //
+@@ -2151,8 +2330,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+ 
+         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+-        DispatchPass(cmdList, resolveParams, modelInput, g_nr.output, g_nr.hdrCopy, motionIn,
+-                            nullptr, target, nullptr);
++        wrote = DispatchPass(cmdList, resolveParams, modelInput, g_nr.output, g_nr.hdrCopy, motionIn,
++                             nullptr, target, nullptr);
+         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+ 
+@@ -2162,7 +2341,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+         // own.
+         if (g_capture.isActive())
+         {
+-            g_capture.record(cmdList, device, g_nr.colorCopy,
++            // The untouched frame, not the encoded proxy: the two halves of a capture have to be in
++            // the same space to be compared, and colorCopy is display-referred while the target is
++            // linear. Reading the proxy as "before" made the frame look like it had lost a stop.
++            g_capture.record(cmdList, device, g_nr.hdrCopy,
+                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+ 
+@@ -2244,6 +2426,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
+     Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+ 
+     device->Release();
++    return wrote;
+ }
+ 
+ namespace DlssNr
+@@ -2253,60 +2436,16 @@ void RetryAfterFailure()
+     g_nr.failed = false;
+     g_nr.reason = "";
+     g_nr.reset = true;
++    g_pre.dlaaFailed = false;
++    g_pre.dlaaReason = "";
+ 
+ }
+ 
+-// Reads the game's parameter block and runs the pass on what it finds.
+-//
+-// This is the call site's job, not the pass's. A caller that has the resources in hand -- a
+-// reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
+-// RunPass directly and never touches an NGX parameter block.
+-void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+-                          ID3D12CommandQueue* timingQueue)
++// What the parameter block says about this frame, read the same way whichever side of the upscaler
++// the model runs on. Everything here is a property of how the game encodes its buffers, and both
++// paths read the block the game filled for the upscaler.
++DlssNrFrameInfo GatherFrame(NVSDK_NGX_Parameter* params)
+ {
+-    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+-    {
+-        ReportSkipOnce("it is switched off");
+-        return;
+-    }
+-
+-    if (cmdList == nullptr || params == nullptr)
+-    {
+-        ReportSkipOnce("no command list or no parameter block");
+-        return;
+-    }
+-
+-    // Which of the game's APIs this evaluate arrived through.
+-    //
+-    // Says out loud what was previously only reasoned about: an FSR or XeSS title reaches this pass
+-    // transitively, because those shims call OptiScaler's own NVSDK_NGX_D3D12_EvaluateFeature and
+-    // this pass hangs off that. Nothing needed adding to the shims -- a call there would run the
+-    // model twice -- but "nothing needed adding" is a claim, and this is the line that checks it.
+-    {
+-        static ApiUpscalerInput saidApi = (ApiUpscalerInput) -1;
+-        const ApiUpscalerInput api = State::Instance().currentInputApiName;
+-
+-        if (saidApi != api)
+-        {
+-            saidApi = api;
+-            LOG_INFO("DLSS-NR reached through the game's {} input", ApiUpscalerInputName(api));
+-        }
+-    }
+-
+-    ID3D12Resource* target = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
+-    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
+-    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
+-
+-    // Without all three there is nothing to run on. This is not a failure -- some evaluates legitimately
+-    // carry none of it -- so it stays quiet and tries again next frame.
+-    if (target == nullptr || depth == nullptr || motion == nullptr)
+-    {
+-        ReportSkipOnce(target == nullptr    ? "the parameters carried no output texture"
+-                       : depth == nullptr   ? "the parameters carried no depth"
+-                                            : "the parameters carried no motion vectors");
+-        return;
+-    }
+-
+     unsigned int createFlags = 0;
+     params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
+ 
+@@ -2339,6 +2478,13 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
+     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success)
+         frame.MvScaleY = 1.0f;
+ 
++    // The frame's jitter, for the before-upscale path to un-jitter what the model sees.
++    if (params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &frame.JitterX) != NVSDK_NGX_Result_Success)
++        frame.JitterX = 0.0f;
++
++    if (params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &frame.JitterY) != NVSDK_NGX_Result_Success)
++        frame.JitterY = 0.0f;
++
+     // What the game says about its own exposure. Logged, used for nothing yet.
+     //
+     // The white point measured from the frame turned out to be a control loop rather than a
+@@ -2439,6 +2585,77 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
+         }
+     }
+ 
++    return frame;
++}
++
++// Reads the game's parameter block and runs the pass on what it finds.
++//
++// This is the call site's job, not the pass's. A caller that has the resources in hand -- a
++// reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
++// RunPass directly and never touches an NGX parameter block.
++void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
++                          ID3D12CommandQueue* timingQueue, bool preUpscaleDeclined)
++{
++    if (!Config::Instance()->DlssNrEnabled.value_or_default())
++    {
++        ReportSkipOnce("it is switched off");
++        return;
++    }
++
++    if (cmdList == nullptr || params == nullptr)
++    {
++        ReportSkipOnce("no command list or no parameter block");
++        return;
++    }
++
++    // Stage 1 runs the model before the upscaler, and this is after it. The caller says whether the
++    // pre-upscale scope it wrapped around this same evaluate declined it for a reason this path can
++    // serve -- ray reconstruction, a colour it could not copy -- and only then does this path run
++    // under stage 1. Otherwise the model would run twice a frame, on both sides of the upscaler.
++    //
++    // The answer travels with the evaluate rather than through a global on purpose. Jedi Survivor's
++    // frame generation evaluates on its own command list, interleaved with the upscaler's, and a
++    // global flag written by one evaluate was read by the other: the after-upscale pass ran, the
++    // model was rebuilt at display size, and rebuilt again at render size the next frame.
++    if (Config::Instance()->DlssNrStage.value_or_default() == 1 && !preUpscaleDeclined)
++    {
++        ReportSkipOnce("stage 1: the model runs before the upscaler, so the after-upscale pass stands down");
++        return;
++    }
++
++    // Which of the game's APIs this evaluate arrived through.
++    //
++    // Says out loud what was previously only reasoned about: an FSR or XeSS title reaches this pass
++    // transitively, because those shims call OptiScaler's own NVSDK_NGX_D3D12_EvaluateFeature and
++    // this pass hangs off that. Nothing needed adding to the shims -- a call there would run the
++    // model twice -- but "nothing needed adding" is a claim, and this is the line that checks it.
++    {
++        static ApiUpscalerInput saidApi = (ApiUpscalerInput) -1;
++        const ApiUpscalerInput api = State::Instance().currentInputApiName;
++
++        if (saidApi != api)
++        {
++            saidApi = api;
++            LOG_INFO("DLSS-NR reached through the game's {} input", ApiUpscalerInputName(api));
++        }
++    }
++
++    ID3D12Resource* target = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
++    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
++    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
++
++    // Without all three there is nothing to run on. This is not a failure -- some evaluates legitimately
++    // carry none of it -- so it stays quiet and tries again next frame.
++    if (target == nullptr || depth == nullptr || motion == nullptr)
++    {
++        ReportSkipOnce(target == nullptr    ? "the parameters carried no output texture"
++                       : depth == nullptr   ? "the parameters carried no depth"
++                                            : "the parameters carried no motion vectors");
++        return;
++    }
++
++    const DlssNrFrameInfo frame = GatherFrame(params);
++
+     // The upscaler's inputs are at render resolution while colour and output are at display
+     // resolution; the model takes that as a subrect per resource, which the pass reads from the
+     // resources themselves.
+@@ -2465,6 +2682,443 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
+     g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
+ }
+ 
++// ---------------------------------------------------------------------------------------------
++// Before the upscaler.
++// ---------------------------------------------------------------------------------------------
++
++namespace
++{
++
++void FailDlaa(const char* why)
++{
++    g_pre.dlaaFailed = true;
++    g_pre.dlaaReason = why;
++    LOG_ERROR("DLSS-NR stage 1: the DLAA pre-pass is off for this session: {}", why);
++}
++
++// Runs the driver's own DLSS at 1:1 over the game's render -- DLAA -- into a surface for the model's
++// eyes. Returns that surface resting in NON_PIXEL_SHADER_RESOURCE, or nullptr when there is nothing
++// usable this frame: the feature was only just created, or it has failed. The caller then shows the
++// model the raw render, exactly as without the pre-pass.
++//
++// Fed the same depth, motion vectors, jitter, exposure and flags the game handed its own DLSS this
++// frame, from the same parameter block. Created on the game's command list and first evaluated a
++// frame later, the rule the model itself is under: creating and evaluating on one list hung the GPU.
++ID3D12Resource* RunDlaa(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, NVSDK_NGX_Parameter* params,
++                        ID3D12Resource* colour, ID3D12Resource* depth, ID3D12Resource* motion,
++                        unsigned int width, unsigned int height, DXGI_FORMAT format,
++                        const DlssNrFrameInfo& frame)
++{
++    if (g_pre.dlaaFailed)
++        return nullptr;
++
++    if (!NVNGXProxy::IsDx12Inited() || NVNGXProxy::D3D12_CreateFeature() == nullptr ||
++        NVNGXProxy::D3D12_EvaluateFeature() == nullptr || NVNGXProxy::D3D12_ReleaseFeature() == nullptr)
++    {
++        FailDlaa("the driver's DLSS is not initialised in this process");
++        return nullptr;
++    }
++
++    // The game's own creation flags, minus sharpening, which has no place in a picture that only
++    // the model sees.
++    unsigned int flags = 0;
++    params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flags);
++    flags &= ~(unsigned int) NVSDK_NGX_DLSS_Feature_Flags_DoSharpening;
++
++    if (g_pre.dlaaHandle != nullptr && (g_pre.dlaaWidth != width || g_pre.dlaaHeight != height ||
++                                        g_pre.dlaaFormat != format || g_pre.dlaaFlags != flags))
++    {
++        // Parked, not released: the previous frame's evaluate may still be on the GPU.
++        ParkNgxFeature(g_pre.dlaaHandle);
++        ParkNrResource(g_pre.dlaa);
++    }
++
++    if (g_pre.dlaa == nullptr)
++    {
++        g_pre.dlaa = CreatePreUpscaleScratch(device, format, width, height);
++
++        if (g_pre.dlaa == nullptr)
++        {
++            FailDlaa("its output surface could not be allocated");
++            return nullptr;
++        }
++    }
++
++    if (g_pre.dlaaParams == nullptr)
++    {
++        NVSDK_NGX_Result r = NVSDK_NGX_Result_Fail;
++
++        if (NVNGXProxy::D3D12_AllocateParameters() != nullptr)
++            r = NVNGXProxy::D3D12_AllocateParameters()(&g_pre.dlaaParams);
++        else if (NVNGXProxy::D3D12_GetParameters() != nullptr)
++            r = NVNGXProxy::D3D12_GetParameters()(&g_pre.dlaaParams);
++
++        if (r != NVSDK_NGX_Result_Success || g_pre.dlaaParams == nullptr)
++        {
++            g_pre.dlaaParams = nullptr;
++            FailDlaa("the driver would not allocate a parameter block for it");
++            return nullptr;
++        }
++    }
++
++    NVSDK_NGX_Parameter* p = g_pre.dlaaParams;
++
++    if (g_pre.dlaaHandle == nullptr)
++    {
++        p->Set(NVSDK_NGX_Parameter_Width, width);
++        p->Set(NVSDK_NGX_Parameter_Height, height);
++        p->Set(NVSDK_NGX_Parameter_OutWidth, width);
++        p->Set(NVSDK_NGX_Parameter_OutHeight, height);
++        p->Set(NVSDK_NGX_Parameter_PerfQualityValue, (int) NVSDK_NGX_PerfQuality_Value_DLAA);
++        p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, flags);
++        p->Set(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, 0u);
++
++        NVSDK_NGX_Result r;
++        {
++            ScopedSkipHeapCapture skipHeapCapture {};
++            r = NVNGXProxy::D3D12_CreateFeature()(cmdList, NVSDK_NGX_Feature_SuperSampling, p, &g_pre.dlaaHandle);
++        }
++
++        if (r != NVSDK_NGX_Result_Success || g_pre.dlaaHandle == nullptr)
++        {
++            g_pre.dlaaHandle = nullptr;
++            LOG_ERROR("DLSS-NR stage 1: DLAA CreateFeature returned 0x{:X} ({})", (unsigned int) r,
++                      NgxResultName((unsigned int) r));
++            FailDlaa("the driver would not create the DLAA feature");
++            return nullptr;
++        }
++
++        g_pre.dlaaWidth = width;
++        g_pre.dlaaHeight = height;
++        g_pre.dlaaFormat = format;
++        g_pre.dlaaFlags = flags;
++        LOG_INFO("DLSS-NR stage 1: DLAA pre-pass created at {}x{} (flags 0x{:X}); from the next frame the model "
++                 "sees the antialiased render and the edit lands on the raw one",
++                 width, height, flags);
++
++        // Never on the list it was created on.
++        return nullptr;
++    }
++
++    // What this frame's evaluate needs, copied from the block the game filled for its own DLSS.
++    p->Set(NVSDK_NGX_Parameter_Color, colour);
++    p->Set(NVSDK_NGX_Parameter_Output, g_pre.dlaa);
++    p->Set(NVSDK_NGX_Parameter_Depth, depth);
++    p->Set(NVSDK_NGX_Parameter_MotionVectors, motion);
++    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, frame.JitterX);
++    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, frame.JitterY);
++    p->Set(NVSDK_NGX_Parameter_MV_Scale_X, frame.MvScaleX);
++    p->Set(NVSDK_NGX_Parameter_MV_Scale_Y, frame.MvScaleY);
++    p->Set(NVSDK_NGX_Parameter_Reset, frame.Reset ? 1 : 0);
++    p->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, frame.PreExposure);
++    p->Set(NVSDK_NGX_Parameter_ExposureTexture, static_cast<ID3D12Resource*>(frame.ExposureTexture));
++    p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, width);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, height);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, 0u);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, 0u);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, 0u);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, 0u);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, 0u);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, 0u);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, 0u);
++    p->Set(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, 0u);
++
++    {
++        float exposureScale = 1.0f;
++
++        if (params->Get(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, &exposureScale) == NVSDK_NGX_Result_Success)
++            p->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, exposureScale);
++
++        float frameTime = 0.0f;
++
++        if (params->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, &frameTime) == NVSDK_NGX_Result_Success)
++            p->Set(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, frameTime);
++
++        int invertX = 0, invertY = 0;
++
++        if (params->Get(NVSDK_NGX_Parameter_DLSS_Indicator_Invert_X_Axis, &invertX) == NVSDK_NGX_Result_Success)
++            p->Set(NVSDK_NGX_Parameter_DLSS_Indicator_Invert_X_Axis, invertX);
++
++        if (params->Get(NVSDK_NGX_Parameter_DLSS_Indicator_Invert_Y_Axis, &invertY) == NVSDK_NGX_Result_Success)
++            p->Set(NVSDK_NGX_Parameter_DLSS_Indicator_Invert_Y_Axis, invertY);
++    }
++
++    // The inputs rest where NGX wants them -- the scope moved the colour there and the game's own
++    // DLSS is about to read the guides in the same states -- and the output rests in UAV.
++    NVSDK_NGX_Result r;
++    {
++        ScopedSkipHeapCapture skipHeapCapture {};
++        r = NVNGXProxy::D3D12_EvaluateFeature()(cmdList, g_pre.dlaaHandle, p, nullptr);
++    }
++
++    if (r != NVSDK_NGX_Result_Success)
++    {
++        LOG_ERROR("DLSS-NR stage 1: DLAA EvaluateFeature returned 0x{:X} ({})", (unsigned int) r,
++                  NgxResultName((unsigned int) r));
++        FailDlaa("the DLAA evaluate failed");
++        return nullptr;
++    }
++
++    Barrier(cmdList, g_pre.dlaa, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
++            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++
++    return g_pre.dlaa;
++}
++
++} // namespace
++
++ScopedPreUpscale::ScopedPreUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
++                                   bool applies, ID3D12CommandQueue* timingQueue)
++    : _cmdList(cmdList), _params(params)
++{
++    const Config& cfg = *Config::Instance();
++
++    if (!cfg.DlssNrEnabled.value_or_default() || cfg.DlssNrStage.value_or_default() != 1)
++        return;
++
++    if (cmdList == nullptr || params == nullptr)
++        return;
++
++    // Declining hands the evaluate to the after-upscale path; a plain return does not. The
++    // distinction is whether the model could still do a sensible job of this frame from the other
++    // side, and for ray reconstruction it can: the finished frame is denoised, the input is not.
++    // The answer is kept on this scope, so it can only ever reach the after-upscale call for the
++    // same evaluate; see EvaluateAfterUpscale for the frame-generation interleaving that made a
++    // global flag wrong.
++    auto decline = [this](const char* why)
++    {
++        _declined = true;
++        ReportSkipOnce(why);
++    };
++
++    if (!applies)
++    {
++        decline("before the upscaler: ray reconstruction's colour is undenoised, so the after-upscale "
++                "pass serves those evaluates");
++        return;
++    }
++
++    // The colour, and how the block stored it. NVIDIA's block keeps typed and untyped slots apart,
++    // OptiScaler's does not; the swap and its undo have to use whichever the game or the bridge used,
++    // or the upscaler reads the original from the other slot and nothing changes.
++    ID3D12Resource* colour = nullptr;
++    bool typed = false;
++
++    {
++        ID3D12Resource* r = nullptr;
++
++        if (params->Get(NVSDK_NGX_Parameter_Color, &r) == NVSDK_NGX_Result_Success && r != nullptr)
++        {
++            colour = r;
++            typed = true;
++        }
++        else
++        {
++            void* u = nullptr;
++
++            if (params->Get(NVSDK_NGX_Parameter_Color, &u) == NVSDK_NGX_Result_Success && u != nullptr)
++                colour = static_cast<ID3D12Resource*>(u);
++        }
++    }
++
++    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
++    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
++
++    if (colour == nullptr || depth == nullptr || motion == nullptr)
++    {
++        ReportSkipOnce(colour == nullptr  ? "before the upscaler: the parameters carried no colour"
++                       : depth == nullptr ? "before the upscaler: the parameters carried no depth"
++                                          : "before the upscaler: the parameters carried no motion vectors");
++        return;
++    }
++
++    // What was drawn, as opposed to how big the texture is. A dynamic-resolution game renders into
++    // the corner of a buffer allocated once at its largest, and the upscaler is told the drawn size
++    // through the render subrect. The copy is that size: the model then works on the picture and
++    // not the margin, and the upscaler reads the copy with the same subrect it would have read the
++    // original with.
++    const D3D12_RESOURCE_DESC colourDesc = colour->GetDesc();
++    unsigned int width = (unsigned int) colourDesc.Width;
++    unsigned int height = colourDesc.Height;
++
++    {
++        unsigned int subW = 0, subH = 0;
++        params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subW);
++        params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subH);
++
++        if (subW != 0 && subH != 0)
++        {
++            width = std::min(subW, width);
++            height = std::min(subH, height);
++        }
++    }
++
++    // The copy starts at the origin, so the game's colour has to as well. A game that offsets its
++    // colour subrect would need the copy offset the same way, which nothing here does yet.
++    {
++        unsigned int baseX = 0, baseY = 0;
++        params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, &baseX);
++        params->Get(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y, &baseY);
++
++        if (baseX != 0 || baseY != 0)
++        {
++            decline("before the upscaler: the game's colour subrect does not start at the origin, "
++                    "which the copy does not follow yet; the after-upscale pass serves instead");
++            return;
++        }
++    }
++
++    const DXGI_FORMAT format = TypedGuideFormat(colourDesc.Format);
++
++    if (IsSrgb(format) || width == 0 || height == 0)
++    {
++        decline("before the upscaler: the game's colour is an sRGB surface, which cannot be written as "
++                "a UAV or read back as linear; the after-upscale pass serves instead");
++        return;
++    }
++
++    ID3D12Device* device = nullptr;
++
++    if (FAILED(colour->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
++    {
++        ReportSkipOnce("before the upscaler: the colour belongs to no D3D12 device");
++        return;
++    }
++
++    {
++        std::lock_guard<std::mutex> lock(g_nrMutex);
++
++        if (g_pre.scratch != nullptr &&
++            (g_pre.width != width || g_pre.height != height || g_pre.format != format))
++        {
++            // Parked, not released: the upscaler read it a frame or two ago and the GPU may still
++            // be there.
++            ParkNrResource(g_pre.scratch);
++        }
++
++        if (g_pre.scratch == nullptr)
++        {
++            g_pre.scratch = CreatePreUpscaleScratch(device, format, width, height);
++            g_pre.width = width;
++            g_pre.height = height;
++            g_pre.format = format;
++
++            if (g_pre.scratch != nullptr)
++                LOG_INFO("DLSS-NR before the upscaler: the model works on the {}x{} render-size colour "
++                         "(format {}, texture {}x{}); the upscaler is handed the edited copy",
++                         width, height, (int) format, (unsigned int) colourDesc.Width, colourDesc.Height);
++        }
++    }
++
++    if (g_pre.scratch == nullptr)
++    {
++        device->Release();
++        decline("before the upscaler: the working copy could not be allocated; the after-upscale pass "
++                "serves instead");
++        return;
++    }
++
++    DlssNrFrameInfo frame = GatherFrame(params);
++    frame.OutputState = (int) D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
++
++    // The colour is read the way NGX reads it, in NON_PIXEL_SHADER_RESOURCE. A game that leaves it
++    // elsewhere says so through ColorResourceBarrier, and OptiScaler's upscalers move it from that
++    // state before reading and back after. They will not see the game's colour this frame -- they
++    // see the copy -- so the move is made here for the game's colour, and the copy is handed over
++    // resting in the same state the game's colour rests in, so that their move applies to it.
++    const D3D12_RESOURCE_STATES colourRest =
++        cfg.ColorResourceBarrier.has_value() ? (D3D12_RESOURCE_STATES) cfg.ColorResourceBarrier.value()
++                                             : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
++
++    Barrier(cmdList, colour, colourRest, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
++
++    // What the model is shown. The raw render, or -- Stage1Input 1 -- the driver's DLAA of it, an
++    // antialiased picture that holds still between frames. The edit lands on the raw render either
++    // way; see DlssNrFrameInfo::OriginalOverride.
++    ID3D12Resource* modelInput = colour;
++
++    {
++        static uint32_t saidInput = 0;
++        const uint32_t input = cfg.DlssNrStage1Input.value_or_default();
++
++        if (saidInput != input)
++        {
++            saidInput = input;
++            LOG_INFO("DLSS-NR stage 1: the model is shown {}",
++                     input == 1 ? "the DLAA of the render" : "the raw render");
++        }
++
++        if (input == 1)
++        {
++            ID3D12Resource* aa = RunDlaa(cmdList, device, params, colour, depth, motion, width, height, format, frame);
++
++            if (aa != nullptr)
++            {
++                modelInput = aa;
++                frame.OriginalOverride = colour;
++            }
++        }
++    }
++
++    if (g_compose == nullptr)
++        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
++
++    device->Release();
++
++    bool wrote = false;
++
++    if (g_compose != nullptr)
++        wrote = g_compose->Dispatch(cmdList, modelInput, depth, motion, g_pre.scratch, frame, timingQueue);
++
++    // The DLAA surface goes back to rest for the next evaluate to write.
++    if (modelInput != colour)
++        Barrier(cmdList, modelInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
++                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++
++    Barrier(cmdList, colour, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, colourRest);
++
++    // Nothing written means nothing to swap: the copy holds stale or no picture, and the upscaler
++    // gets the game's own colour, which is the frame as it would have been without the pass. This is
++    // every frame until the model is built, and any frame the pass skips.
++    if (!wrote)
++    {
++        ReportSkipOnce("before the upscaler: the model wrote nothing this frame (it is being built, or "
++                       "the frame was skipped), so the upscaler was given the game's own colour");
++        return;
++    }
++
++    Barrier(cmdList, g_pre.scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, colourRest);
++
++    if (typed)
++        params->Set(NVSDK_NGX_Parameter_Color, g_pre.scratch);
++    else
++        params->Set(NVSDK_NGX_Parameter_Color, (void*) g_pre.scratch);
++
++    _original = colour;
++    _originalTyped = typed;
++    _scratchState = (int) colourRest;
++    _swapped = true;
++}
++
++ScopedPreUpscale::~ScopedPreUpscale()
++{
++    if (!_swapped)
++        return;
++
++    // The game's colour goes back before the block is reused, and the copy goes back to rest where
++    // the next frame's pass expects to find it. The list is still recording: the scope closes right
++    // after the evaluate it wrapped, before anything is submitted.
++    if (_originalTyped)
++        _params->Set(NVSDK_NGX_Parameter_Color, _original);
++    else
++        _params->Set(NVSDK_NGX_Parameter_Color, (void*) _original);
++
++    if (g_pre.scratch != nullptr)
++        Barrier(_cmdList, g_pre.scratch, (D3D12_RESOURCE_STATES) _scratchState,
++                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++}
++
+ // The pass. Resources in, nothing read from anywhere the caller cannot see.
+ 
+ void ProbeD3D11(void* d3d11Device)
+@@ -2659,6 +3313,28 @@ void Shutdown()
+         f = nullptr;
+     }
+ 
++    if (g_pre.scratch != nullptr)
++    {
++        g_pre.scratch->Release();
++        g_pre.scratch = nullptr;
++    }
++
++    if (g_pre.dlaaHandle != nullptr && NVNGXProxy::D3D12_ReleaseFeature() != nullptr)
++        NVNGXProxy::D3D12_ReleaseFeature()(g_pre.dlaaHandle);
++
++    g_pre.dlaaHandle = nullptr;
++
++    if (g_pre.dlaaParams != nullptr && NVNGXProxy::D3D12_DestroyParameters() != nullptr)
++        NVNGXProxy::D3D12_DestroyParameters()(g_pre.dlaaParams);
++
++    g_pre.dlaaParams = nullptr;
++
++    if (g_pre.dlaa != nullptr)
++    {
++        g_pre.dlaa->Release();
++        g_pre.dlaa = nullptr;
++    }
++
+     if (g_nr.output != nullptr)
+     {
+         g_nr.output->Release();
+diff --git a/OptiScaler/shaders/dlssnr/DlssNr_Dx12.h b/OptiScaler/shaders/dlssnr/DlssNr_Dx12.h
+index 56fdff75..06685311 100644
+--- a/OptiScaler/shaders/dlssnr/DlssNr_Dx12.h
++++ b/OptiScaler/shaders/dlssnr/DlssNr_Dx12.h
+@@ -78,10 +78,21 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
+     // rebuilds it when the tuning or the resolution changes, evaluates it, and runs the compute passes
+     // that show it the frame and bring its answer back. One call, like any other shader here.
+     //
+-    // Sizes come from the resources. Everything the pass cannot work out for itself is in
+-    // DlssNrFrameInfo; everything the user chose stays in Config. colour and output may be the same
+-    // resource. timingQueue is the queue this list will be executed on, when the caller knows it.
+-    void Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
++    // Sizes come from the output resource. Everything the pass cannot work out for itself is in
++    // DlssNrFrameInfo; everything the user chose stays in Config. timingQueue is the queue this list
++    // will be executed on, when the caller knows it.
++    //
++    // colour is what the model is shown and output is where the edited frame lands. They may be the
++    // same resource, which is the after-upscale path: the pass reads the upscaler's output and writes
++    // it back. When they differ -- the before-upscale path -- colour is read as a shader resource in
++    // the state NGX requires of every input, NON_PIXEL_SHADER_RESOURCE, and never written; the
++    // untouched original is taken from it and the edit is written to output alone. Only the output's
++    // top-left colour-sized region is read from a colour larger than the output.
++    //
++    // Returns true only when the resolve wrote the output this frame. Every other way out -- the
++    // model still being built, a skipped frame, a failure -- leaves the output exactly as it arrived,
++    // and a caller that means to hand the output on in place of the original has to know that.
++    bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
+                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
+                   ID3D12CommandQueue* timingQueue = nullptr);
+ 
+diff --git a/OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl b/OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl
+index cc7b11ed..5a21b14e 100644
+--- a/OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl
++++ b/OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl
+@@ -25,8 +25,22 @@ cbuffer Params : register(b0)
+     uint  gCompareSwap;  // put the edited frame on the other side
+     uint  gTransfer;     // 0 classic, 1 matched residual -- how a below-size model comes back
+     float gDebugScale;   // what the debug views are scaled by, held still while the meter moves
++    float gJitterX;      // the game's sub-pixel jitter this frame, render pixels
++    float gJitterY;
++    uint  gUnjitter;     // 0 off, 1 sample the frame at +jitter and read the answer back at -jitter, 2 signs swapped
++    uint  gForeign;      // the model saw a different picture (DLAA) from the frame the edit lands on
+ };
+ 
++// The offset, in frame pixels, that un-jittering moves the model's view of the frame by. Zero when
++// off, so every read below that adds it is exactly the read it was before.
++float2 UnjitterOffset()
++{
++    if (gUnjitter == 0)
++        return float2(0.0, 0.0);
++
++    return float2(gJitterX, gJitterY) * (gUnjitter == 2 ? -1.0 : 1.0);
++}
++
+ // Bringing an impossible colour back into a possible one.
+ //
+ // A colour with a negative component is not a colour any display can show, and the composition can
+@@ -511,8 +525,31 @@ void CSMain(uint3 id : SV_DispatchThreadID)
+         float4 source = gSource.Load(int3(id.xy, 0));
+         float3 frame = max(source.rgb, float3(0.0, 0.0, 0.0));
+ 
+-        // Kept so the resolve has the frame as it was, rather than having to reconstruct it.
+-        gKeep[id.xy] = float4(frame, source.a);
++        // Kept so the resolve has the frame as it was, rather than having to reconstruct it. When the
++        // model is being shown something other than the frame -- the DLAA pre-pass -- the frame the
++        // edit lands on arrives in the original slot, and that is what is kept.
++        float4 keep = gForeign != 0 ? gOriginal.Load(int3(id.xy, 0)) : source;
++        gKeep[id.xy] = float4(max(keep.rgb, float3(0.0, 0.0, 0.0)), keep.a);
++
++        // Before the upscaler the frame is the game's jittered render: the whole picture sits a
++        // fraction of a pixel away from where it sat last frame, and the model re-decides every
++        // edge on a picture that shifts under it. Measured in Jedi Survivor at three times the
++        // frame-to-frame instability of the same model on a resolved frame. Sampling the frame
++        // back by the jitter shows the model a picture that holds still; the copy kept above is
++        // untouched, and the resolve reads the answer back by the same offset.
++        //
++        // Normalised against the source's own size rather than the dispatch's: on that path the
++        // source may be a dynamic-resolution game's larger allocation, of which this dispatch is
++        // the drawn corner.
++        const float2 unjitter = UnjitterOffset();
++
++        if (any(unjitter != 0.0))
++        {
++            uint srcW, srcH;
++            gSource.GetDimensions(srcW, srcH);
++            const float2 srcUv = (float2(id.xy) + 0.5 + unjitter) / float2(srcW, srcH);
++            frame = max(gSource.SampleLevel(gLinear, srcUv, 0).rgb, float3(0.0, 0.0, 0.0));
++        }
+ 
+         // Some games hand DLSS a frame that has already been through their tonemapper. The game says
+         // which in its own DLSS creation flags, and converting one that needs no conversion is pure
+@@ -578,8 +615,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
+ 
+     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
+     // frame, and its edit is enlarged here while the frame underneath stays untouched.
+-    float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
+-    float4 modelSample = gModel.SampleLevel(gLinear, cmpUv, 0);
++    //
++    // Both read back by the un-jitter offset the encode applied, so the proxy and the model's
++    // answer land on the frame's own grid again. The two move together, so their difference -- the
++    // edit -- is what was computed, only put back where it belongs. Nothing when un-jittering is off.
++    const float2 readUv = cmpUv - UnjitterOffset() / float2(gWidth, gHeight);
++    float4 proxySample = gSource.SampleLevel(gLinear, readUv, 0);
++    float4 modelSample = gModel.SampleLevel(gLinear, readUv, 0);
+ 
+     // Nothing was encoded on the way in, so nothing is decoded here either.
+     float3 proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
+@@ -663,7 +705,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
+     gSource.GetDimensions(proxyW, proxyH);
+     const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight;
+ 
+-    if (gTransfer == 1 && modelRanSmall)
++    // Forced, whatever the transfer setting, when the model saw a different picture from the frame:
++    // the proxy read above is the antialiased picture's, the original is the raw render, and the
++    // classic ratio between the two is the difference between an antialiased edge and an aliased
++    // one, which is not an edit the model made. Only the model's own difference may cross.
++    if ((gTransfer == 1 && modelRanSmall) || gForeign != 0)
+     {
+         // Saturated, because that is what the encode does and this has to reproduce it exactly.
+         //
+diff --git a/OptiScaler/upscalers/IFeature_Dx11wDx12.cpp b/OptiScaler/upscalers/IFeature_Dx11wDx12.cpp
+index 7f247657..808e1820 100644
+--- a/OptiScaler/upscalers/IFeature_Dx11wDx12.cpp
++++ b/OptiScaler/upscalers/IFeature_Dx11wDx12.cpp
+@@ -457,7 +457,18 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
+                               (void*) dx11Reactive.Dx12Resource);
+ 
+         LOG_DEBUG("Dispatch!!");
+-        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
++
++        bool preUpscaleDeclined = false;
++
++        {
++            // Neural Rendering before the upscaler, when the stage says so. The block carries the
++            // D3D12 copies of the game's inputs at this point, so the model reads the render-size
++            // colour copy and the upscaler is handed the edited one. The bridge carries super
++            // resolution only, so every evaluate applies.
++            DlssNr::ScopedPreUpscale pre(cmdList, InParameters, true, Dx12CommandQueue);
++            dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
++            preUpscaleDeclined = pre.Declined();
++        }
+ 
+         // DLSS 5 Neural Rendering rides the bridge: at this moment the block carries the D3D12 copies
+         // of every input, the list is still recording, and the model's edit lands on the D3D12 output
+@@ -475,7 +486,7 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
+ 
+         if (dx12EvalResult && Config::Instance()->DlssNrEnabled.value_or_default())
+         {
+-            DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue);
++            DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue, preUpscaleDeclined);
+ 
+             // Asked only after the D3D12 path has had its turn. Probing first would have made a D3D11
+             // init the very first thing to ever touch the snippet, and if that had left its core
+diff --git a/OptiScaler/upscalers/IFeature_VkwDx12.cpp b/OptiScaler/upscalers/IFeature_VkwDx12.cpp
+index edf39270..ac6379c8 100644
+--- a/OptiScaler/upscalers/IFeature_VkwDx12.cpp
++++ b/OptiScaler/upscalers/IFeature_VkwDx12.cpp
+@@ -2156,7 +2156,15 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
+             InParameters->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) vkReactive.Dx12Resource);
+ 
+         LOG_DEBUG("Dispatch!!");
+-        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
++
++        bool preUpscaleDeclined = false;
++
++        {
++            // Neural Rendering before the upscaler, when the stage says so; see the D3D11 bridge.
++            DlssNr::ScopedPreUpscale pre(cmdList, InParameters, true, Dx12CommandQueue);
++            dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
++            preUpscaleDeclined = pre.Declined();
++        }
+ 
+         // The parameter block still holds the D3D12 resources written above -- the Vulkan handles are
+         // not put back until after this -- so the pass reads exactly what the upscaler just wrote.
+@@ -2170,7 +2178,7 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
+         }
+ 
+         if (dx12EvalResult && Config::Instance()->DlssNrEnabled.value_or_default())
+-            DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue);
++            DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue, preUpscaleDeclined);
+ 
+     } while (false);
+ 
